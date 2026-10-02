@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>simulateInvestment checks</title>
+  <script src="./simulateInvestment.js"></script>
+</head>
+<body>
+  <pre id="results">Running checks...</pre>
+  <script>
+    const tolerance = 1e-8;
+    const checks = [
+      {
+        name: 'Zero return and annual contribution increase',
+        actual: simulateInvestment(1000, 100, 2, 0.1, 0, 1, 0),
+        balances: [2200, 3520],
+        invested: [2200, 3520]
+      },
+      {
+        name: 'Initial amount only with monthly compounding',
+        actual: simulateInvestment(1000, 0, 2, 0, 0.1, 1, 0),
+        balances: [1104.713067441297, 1220.3909613755593],
+        invested: [1000, 1000]
+      },
+      {
+        name: 'Monthly contributions and zero return',
+        actual: simulateInvestment(0, 100, 2, 0, 0, 1, 0),
+        balances: [1200, 2400],
+        invested: [1200, 2400]
+      },
+      {
+        name: 'Delayed start in year three',
+        actual: simulateInvestment(1000, 100, 4, 0, 0, 3, 0),
+        balances: [0, 0, 2200, 3400],
+        invested: [0, 0, 2200, 3400]
+      },
+      {
+        name: 'Contributions stop at year three',
+        actual: simulateInvestment(100, 10, 4, 0, 0, 1, 3),
+        balances: [220, 340, 340, 340],
+        invested: [220, 340, 340, 340]
+      }
+    ];
+
+    function matches(actual, expected) {
+      return actual.length === expected.length && actual.every((value, index) => Math.abs(value - expected[index]) <= tolerance);
+    }
+
+    const failures = checks.filter(check =>
+      !matches(check.actual.balances, check.balances) ||
+      !matches(check.actual.balancesInvested, check.invested) ||
+      Math.abs(check.actual.finalBalance - check.balances[check.balances.length - 1]) > tolerance ||
+      Math.abs(check.actual.totalInvested - check.invested[check.invested.length - 1]) > tolerance
+    );
+
+    document.getElementById('results').textContent = failures.length
+      ? `FAILED (${failures.length}/${checks.length})\n${failures.map(check => check.name).join('\n')}`
+      : `PASS (${checks.length}/${checks.length})\n${checks.map(check => check.name).join('\n')}`;
+
+    if (failures.length) throw new Error(`${failures.length} simulateInvestment check(s) failed.`);
+  </script>
+</body>
+</html>

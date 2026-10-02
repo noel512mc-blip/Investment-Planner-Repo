@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Milestone — Investment Planner</title>
+  <meta name="description" content="Milestone Investment Planner — project your investment growth with per-person simulations, household portfolios, scenario analysis, and retirement planning.">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%232563eb'/><polyline points='3,28 10,20 16,14 22,8' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/><circle cx='22' cy='8' r='3.5' fill='%2310b981'/></svg>">
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <link rel="stylesheet" href="./css/styles.css">
+</head>
+
+<body>
+<script>if (localStorage.getItem('investment_darkMode') !== '0') document.body.classList.add('dark-mode');</script>
+
+  <header class="app-header">
+    <svg viewBox="0 0 520 110" height="40" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+      <g transform="translate(10, 5)">
+        <path d="M0 100 C20 100 30 80 50 70 C70 60 80 55 100 40 C120 25 130 20 155 8" style="fill:none;stroke:rgb(59,130,246);stroke-width:3px;stroke-linecap:round;opacity:0.25;"/>
+        <path d="M0 100 C20 100 30 80 50 70 C70 60 80 55 100 40 C120 25 130 20 155 8" style="fill:none;stroke:rgb(59,130,246);stroke-width:3px;stroke-linecap:round;"/>
+        <circle cx="50" cy="70" r="5" fill="rgb(59,130,246)"/>
+        <line x1="50" y1="70" x2="50" y2="48" stroke="rgb(59,130,246)" stroke-width="2" stroke-linecap="round"/>
+        <rect x="50" y="38" width="18" height="10" rx="2" fill="#2563eb"/>
+        <circle cx="100" cy="40" r="5" fill="rgb(59,130,246)"/>
+        <line x1="100" y1="40" x2="100" y2="18" stroke="rgb(59,130,246)" stroke-width="2" stroke-linecap="round"/>
+        <rect x="100" y="8" width="18" height="10" rx="2" fill="#2563eb"/>
+        <circle cx="155" cy="8" r="7" fill="rgb(16,185,129)"/>
+        <circle cx="155" cy="8" r="4" fill="white" opacity="0.6"/>
+        <circle cx="0" cy="100" r="3" fill="rgb(59,130,246)" opacity="0.4"/>
+        <text x="182" y="68" font-family="Arial, sans-serif" font-size="56" font-weight="700" fill="var(--color-text-title)">Milestone</text>
+        <text x="185" y="90" font-family="Arial, sans-serif" font-size="17" letter-spacing="1.5" fill="var(--color-text-muted)">INVESTMENT PLANNER</text>
+      </g>
+    </svg>
+    <button id="accountBtn" onclick="toggleAccountDropdown()" title="Account" style="width:36px;height:36px;border-radius:50%;background:var(--accent-muted);border:1.5px solid color-mix(in srgb, var(--accent) 35%, transparent);cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background var(--anim-fast),border-color var(--anim-fast);" onmouseenter="this.style.borderColor='var(--accent)'" onmouseleave="this.style.borderColor='color-mix(in srgb, var(--accent) 35%, transparent)'">
+      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="8" r="4"/>
+        <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
+      </svg>
+    </button>
+  </header>
+
+  <div class="container">
+
+    <div class="left-column">
+      <div class="panel" style="padding: 12px 16px;">
+
+        <!-- PLAN BAR - always visible -->
+        <div onclick="togglePlansPanel()" style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;">
+          <div id="planBarLabel" style="font-size:14px;color:var(--color-text);">Plan: <strong style="color:var(--color-text-title);">(none)</strong></div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <button id="plansToggleBtn" onclick="event.stopPropagation(); togglePlansPanel()" class="collapse-btn" style="transform:rotate(90deg);"></button>
+          </div>
+        </div>
+
+        <!-- ACCOUNT LIST - collapsible -->
+        <div id="plansPanel" style="overflow:hidden; max-height:0; transition: max-height var(--anim-standard) var(--ease-premium), margin-top var(--anim-standard); margin-top:0;">
+          <div style="border-top: 1px solid #e5e7eb; margin-top:12px; padding-top:12px;">
+            <div id="plansList"></div>
+            <div style="display:flex;gap:8px;margin-top:8px;">
+              <button class="new-plan-btn" onclick="createNewPlan(); event.stopPropagation();">New Plan</button>
+              <button class="import-plan-btn" onclick="importSharedPlan(); event.stopPropagation();">
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24"
+                  fill="none" stroke="currentColor" stroke-width="2.2"
+                  stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
+                  <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/>
+                  <polyline points="16 6 12 2 8 6"/>
+                  <line x1="12" y1="2" x2="12" y2="15"/>
+                </svg>
+                Import plan
+              </button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="panel people-panel" style="flex: 1;">
+        <div class="left-layout">
+
+        <!-- PEOPLE -->
+        <div class="people-column">
+
+          <div class="people-header-wrap" onclick="toggleAllCards()" style="cursor:pointer;">
+            <h2 class="section-title" style="margin-bottom:0;flex:1;">People</h2>
+            <button class="people-collapse-btn" title="Collapse / expand all"></button>
+          </div>
+
+          <div id="peopleContainer"></div>
+
+          <div class="add-person-footer">
+            <div class="add-person-blur-bg"></div>
+            <button class="add-person-btn" onclick="addPerson()">
+              + Add Person
+            </button>
+          </div>
+
+        </div>
+
+        <!-- SETTINGS -->
+        <div class="settings-column">
+
+          <div class="settings-scroll-area">
+
+          <h2 class="section-title">Investment Settings</h2>
+
+          <div class="input-group">
+            <label id="yearsLabel">Investment Duration (Years)</label>
+            <input type="number" id="years" value="30"
+oninput="calculateInvestment()">
+          </div>
+
+          <div class="input-group" id="returnRateGroup">
+  <label>Estimated Annual Market Return (%)</label>
+
+  <input type="number"
+         id="returnRate"
+         value="8"
+         oninput="calculateInvestment()">
+</div>
+
+<!-- PER-PERSON RETURN TOGGLE -->
+
+<div class="input-group" id="perPersonReturnGroup" style="display:none;">
+  <label class="checkbox-label">
+    <span>Per-Person Return Rate</span>
+    <input
+      type="checkbox"
+      id="perPersonReturn"
+      role="switch"
+      aria-label="Per-Person Return Rate"
+      oninput="
+        toggleReturnRateMode();
+        calculateInvestment();
+      "
+    >
+    <label
+      for="perPersonReturn"
+      class="toggle-pill"
+      id="perPersonReturnPill"
+    >
+      <div class="track"></div>
+      <div class="thumb"></div>
+    </label>
+  </label>
+</div>
+
+<!-- INFLATION TOGGLE -->
+
+<div class="input-group">
+
+  <label class="checkbox-label">
+
+    <span>Adjust for Inflation</span>
+
+    <input
+      type="checkbox"
+      id="useInflation"
+      role="switch"
+      aria-label="Adjust for Inflation"
+      oninput="
+        toggleInflationSettings();
+        calculateInvestment();
+      "
+    >
+
+    <label
+      for="useInflation"
+      class="toggle-pill"
+      id="togglePill"
+    >
+      <div class="track"></div>
+      <div class="thumb"></div>
+    </label>
+
+  </label>
+
+</div>
+
+<!-- INFLATION RATE -->
+
+<div class="input-group" id="inflationSettings">
+
+  <label>Expected Inflation (%)</label>
+
+  <input type="number"
+         id="inflationRate"
+         value="2.5"
+         step="0.1"
+         oninput="calculateInvestment()">
+
+</div>
+
+<!-- HIGHLIGHTED SETTINGS -->
+
+<div
+  id="highlightedSettingsPanel"
+  class="highlighted-settings-panel"
+>
+
+  <div class="highlighted-settings-header">
+    Analysis Settings
+  </div>
+
+  <div class="input-group" id="scenariosToggleGroup">
+    <label class="checkbox-label">
+      <span>Show Scenarios</span>
+      <input
+        type="checkbox"
+        id="showScenariosToggle"
+        role="switch"
+        aria-label="Show Scenarios"
+        oninput="toggleShowScenarios()"
+      >
+      <label for="showScenariosToggle" class="toggle-pill" id="showScenariosPill">
+        <div class="track"></div>
+        <div class="thumb"></div>
+      </label>
+    </label>
+  </div>
+
+  <div id="scenarioRangeGroup" style="display:none;">
+  <div class="input-group">
+
+    <label>Scenario Range (%)</label>
+
+    <input
+      type="number"
+      id="scenarioRange"
+      value="2"
+      step="0.1"
+      oninput="calculateInvestment()"
+    >
+
+  </div>
+  </div>
+
+  <div id="retirementSettingsGroup" style="display:none;">
+
+  <div class="highlighted-settings-subsection">
+    <h4>Retirement Planning</h4>
+  </div>
+
+  <div style="font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;
+    color:var(--color-text-muted);margin-bottom:10px;margin-top:2px;opacity:0.6;">
+    Required Assumptions
+  </div>
+
+  <div class="input-group">
+    <label>Current Age<span class="ret-req-star">*</span></label>
+    <input type="number" id="currentAge" value="30" oninput="_onRetInput('age')" onfocus="_retFieldFocus()" onblur="_retFieldBlur()">
+  </div>
+
+  <div class="input-group">
+    <label class="checkbox-label">
+      <span>State Pension<span class="ret-req-star">*</span></span>
+      <input type="checkbox" id="statePensionEnabled" role="switch"
+        aria-label="State Pension" checked oninput="onStatePensionToggleChange()">
+      <label for="statePensionEnabled" class="toggle-pill toggle-active" id="statePensionPill">
+        <div class="track"></div>
+        <div class="thumb"></div>
+      </label>
+    </label>
+  </div>
+  <div class="input-group" id="statePensionAgeGroup">
+    <label>State Pension Age<span class="ret-req-star">*</span></label>
+    <input type="number" id="retirementAge" value="67" oninput="_onRetInput('pension')" onfocus="_retFieldFocus()" onblur="_retFieldBlur()">
+  </div>
+  <div class="input-group" id="statePensionIncomeGroup" style="display:none;">
+    <label><span id="statePensionIncomeLabel">State Pension Income (€/mo)</span></label>
+    <input type="number" id="statePensionIncome" min="0" value="" placeholder="0"
+      oninput="_onRetInput('pension')" onfocus="_retFieldFocus()" onblur="_retFieldBlur()">
+  </div>
+
+  <div class="input-group">
+    <label><span id="withdrawalGoalLabel">Monthly Income Target (€)</span><span class="ret-req-star">*</span></label>
+    <input type="number" id="withdrawalGoal" value="5000" oninput="_onRetInput('income')" onfocus="_retFieldFocus()" onblur="_retFieldBlur()">
+  </div>
+
+  <div class="input-group">
+    <label
+      title="The % of your portfolio you withdraw yearly. 4% is a widely used realistic number based on historical market returns."
+      style="cursor:help; text-decoration: underline dotted #94a3b8;"
+    >Safe Withdrawal Rate (%)<span class="ret-req-star">*</span></label>
+    <input type="number" id="withdrawalRate" value="4" step="0.1" oninput="_onRetInput('rate')" onfocus="_retFieldFocus()" onblur="_retFieldBlur()">
+  </div>
+
+  <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--color-border);">
+    <div style="font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;
+      color:var(--color-text-muted);margin-bottom:10px;opacity:0.6;">
+      Additional Planning Options
+    </div>
+    <div id="additionalIncomeContainer"></div>
+    <button class="ret-add-income-btn" id="addIncomeSourceBtn" onclick="_addIncomeSource()">
+      <span class="ret-add-icon">+</span>
+      Add Additional Income
+    </button>
+  </div>
+
+  <div style="margin-top:16px;">
+    <button id="retVerifyBtn" disabled onclick="_onRetVerify()">Review &amp; Verify Settings</button>
+    <div id="retVerifyHint">Fill in all required fields above to enable</div>
+  </div>
+
+  </div>
+
+          </div>
+
+        <!-- ANALYSIS ENTRY -->
+        <div class="analysis-entry-section">
+          <div class="highlighted-settings-header">Analysis</div>
+          <button onclick="startAnalysisMode()" style="
+            width: 100%;
+            padding: 11px;
+            border-radius: 10px;
+            border: none;
+            background: #10b981;
+            color: white;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            letter-spacing: 0.01em;
+            transition: background var(--anim-fast);
+          "
+          onmouseenter="this.style.background='#059669'"
+          onmouseleave="this.style.background='#10b981'">
+            Start Analysis
+          </button>
+        </div>
+
+</div>
+
+        </div>
+
+        </div>
+
+      </div>
+    </div>
+
+    <!-- HIDDEN ACCOUNT STATE -->
+    <input type="hidden" id="planCurrency" value="€">
+    <input type="hidden" id="planStartYear" value="0">
+
+    <!-- RIGHT PANEL -->
+    <div class="right-column">
+    <div class="panel">
+
+    <div id="combinedResults"></div>
+
+  <div class="chart-container">
+  <canvas id="investmentChart"></canvas>
+  <div id="profitTooltip" style="position:absolute;pointer-events:none;opacity:0;transition:opacity var(--anim-fast);background:var(--bg-panel);border:1px solid var(--color-border);border-radius:10px;padding:10px 13px;min-width:190px;box-shadow:var(--shadow-hover);z-index:10;"></div>
+</div>
+
+<div id="analysisTabs"></div>
+<div id="bottomResults"></div>
+<div style="height: 12px;"></div>
+<div id="retSetupCardSlot"></div>
+<div id="personResults"></div>
+
+    </div>
+    </div>
+
+  </div>
+
+  <script src="./js/simulateInvestment.js"></script>
+  <script src="./js/planStorage.js"></script>
+  <script src="./js/planUI.js"></script>
+  <script src="./js/sharedPlan.js"></script>
+  <script src="./js/displayUtils.js"></script>
+  <script src="./js/analyticsCharts.js"></script>
+  <script src="./js/retirementCalculations.js"></script>
+  <script src="./js/investmentCalculations.js"></script>
+  <script src="./js/householdCalculations.js"></script>
+  <script src="./js/app.js"></script>
+</body>
+</html>

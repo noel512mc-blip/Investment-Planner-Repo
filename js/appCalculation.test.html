@@ -1,0 +1,866 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Milestone calculation checks</title>
+  <style>
+    body { max-width: 900px; margin: 32px auto; padding: 0 20px; font: 14px/1.5 system-ui, sans-serif; color: #1f2937; }
+    h1 { font-size: 22px; }
+    #status { padding: 12px; background: #f3f4f6; border-radius: 6px; white-space: pre-wrap; }
+    #status.pass { background: #ecfdf5; color: #065f46; }
+    #status.fail { background: #fef2f2; color: #991b1b; }
+    iframe { position: fixed; left: -1400px; top: 0; width: 1280px; height: 900px; border: 0; }
+  </style>
+</head>
+<body>
+  <h1>Milestone calculation characterization</h1>
+  <p>This standalone suite loads the real planner in an iframe and asserts numeric results. From PowerShell at the workspace root, run <code>Get-Content .\js\serveAppCalculationTests.ps1 -Raw | Invoke-Expression</code>, then open <code>http://127.0.0.1:8765/js/appCalculation.test.html</code>. Press Ctrl+C to stop the server. It refuses to run from <code>file://</code> so the planner's normal file-page storage is not touched.</p>
+  <div id="status">Starting checks...</div>
+  <iframe id="planner" title="Isolated planner under test"></iframe>
+  <script>
+    (async function() {
+      const status = document.getElementById('status');
+      const frame = document.getElementById('planner');
+      const tolerance = 1e-6;
+      const checks = [];
+
+      if (location.protocol !== 'http:' || !['localhost', '127.0.0.1'].includes(location.hostname)) {
+        status.className = 'fail';
+        status.textContent = 'NOT RUN: open this page from a localhost web server to keep test storage separate from the normal file:// planner.';
+        return;
+      }
+
+      const previousPlans = localStorage.getItem('investment_plans');
+      const previousActiveId = localStorage.getItem('investment_activePlanId');
+      const retirement = {
+        currentAge: 30,
+        withdrawalGoal: 5000,
+        withdrawalRate: 4,
+        statePensionEnabled: true,
+        statePensionAge: 67,
+        statePensionIncome: 0,
+        additionalIncomeSources: []
+      };
+
+      function person(id, name, initial, monthly, increaseRate = 0) {
+        return {
+          id, name, initial, monthly, increaseRate, startOffset: 1, stopOffset: 0,
+          returnRate: null,
+          retirementSettings: { ...retirement }
+        };
+      }
+
+      function plan(name, people, options = {}) {
+        return {
+          name,
+          people,
+          settings: {
+            years: 1,
+            increaseRate: 2,
+            returnRate: 8,
+            perPersonReturn: false,
+            useInflation: false,
+            inflationRate: 2.5,
+            scenarioRange: 2,
+            currentAge: 30,
+            retirementAge: 67,
+            noStatePension: false,
+            withdrawalGoal: 5000,
+            withdrawalRate: 4,
+            statePensionIncome: 0,
+            householdMembers: [],
+            currency: '€',
+            startYear: 0,
+            ...options
+          }
+        };
+      }
+
+      function assertNear(actual, expected, description) {
+        if (!Number.isFinite(actual) || Math.abs(actual - expected) > tolerance) {
+          throw new Error(`${description}: expected ${expected}, got ${actual} (tolerance ${tolerance})`);
+        }
+      }
+
+      function record(name, inputs, expectation, actual) {
+        checks.push({ name, inputs, expectation, actual, passed: true });
+      }
+
+      async function waitFor(predicate, description, timeout = 12000) {
+        const deadline = Date.now() + timeout;
+        while (Date.now() < deadline) {
+          if (predicate()) return;
+          await new Promise(resolve => setTimeout(resolve, 40));
+        }
+        throw new Error(`Timed out waiting for ${description}`);
+      }
+
+      async function loadPlan(testPlan, id) {
+        localStorage.setItem('investment_plans', JSON.stringify({ [id]: testPlan }));
+        localStorage.setItem('investment_activePlanId', id);
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('Planner page load timed out')), 20000);
+          frame.onload = () => { clearTimeout(timer); resolve(); };
+          frame.onerror = () => { clearTimeout(timer); reject(new Error('Planner page failed to load')); };
+          frame.src = `../index.html?calculationTest=${Date.now()}`;
+        });
+        const win = frame.contentWindow;
+        const doc = win.document;
+        await waitFor(() => win.Chart && win.Chart.getChart(doc.getElementById('investmentChart')), 'main investment chart');
+        return { win, doc, chart: win.Chart.getChart(doc.getElementById('investmentChart')) };
+      }
+
+      async function reloadAppFromExistingStorage() {
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('Planner reload timed out')), 20000);
+          frame.onload = () => { clearTimeout(timer); resolve(); };
+          frame.onerror = () => { clearTimeout(timer); reject(new Error('Planner reload failed')); };
+          frame.src = `../index.html?calculationTest=${Date.now()}`;
+        });
+        const win = frame.contentWindow;
+        const doc = win.document;
+        await waitFor(() => win.Chart && win.Chart.getChart(doc.getElementById('investmentChart')), 'reloaded main investment chart');
+        return { win, doc, chart: win.Chart.getChart(doc.getElementById('investmentChart')) };
+      }
+
+      function setInput(win, doc, id, value) {
+        const input = doc.getElementById(id);
+        if (!input) throw new Error(`Missing input #${id}`);
+        input.value = String(value);
+        input.dispatchEvent(new win.Event('input', { bubbles: true }));
+      }
+
+      function personBalance(win, id) {
+        return win.eval(`personFinalBalances[${id}]`);
+      }
+
+      function dataset(chart, label) {
+        const result = chart.data.datasets.find(item => item.label === label);
+        if (!result) throw new Error(`Missing chart dataset "${label}"`);
+        return result;
+      }
+
+      function resultCardValue(doc, label) {
+        const card = [...doc.querySelectorAll('#combinedResults .card')]
+          .find(item => item.querySelector('h3')?.textContent.trim().startsWith(label));
+        if (!card) throw new Error(`Missing summary card "${label}"`);
+        return card.querySelector('p')?.textContent.trim() || '';
+      }
+
+      async function runCase(name, inputs, expectation, body) {
+        try {
+          const actual = await body();
+          record(name, inputs, expectation, actual);
+        } catch (error) {
+          checks.push({ name, inputs, expectation, actual: error.message, passed: false });
+        }
+      }
+
+      // Numeric snapshots captured from the original controller block before extraction.
+      // Contributions begin in year 2, increase in year 3, and stop in year 4.
+      const projectionFixtures = [
+        {"inputs":{"initial":1000,"monthly":50,"years":4,"personIncreaseRate":0.1,"personReturnRate":0,"personStartOffset":2,"personStopOffset":4,"scenarioRange":0.02,"useInflation":false,"inflationRate":0.05,"isHighlighted":true},"expected":{"result":{"finalBalance":2260,"totalInvested":2260,"totalProfit":0,"balances":[0,1600,2260,2260],"balancesInvested":[0,1600,2260,2260]},"bullResult":{"finalBalance":2373.7165017745424,"totalInvested":2260,"totalProfit":113.7165017745424,"balances":[0,1626.724243910617,2326.7525016974573,2373.7165017745424],"balancesInvested":[0,1600,2260,2260]},"bearResult":{"finalBalance":2151.9195800396897,"totalInvested":2260,"totalProfit":-108.08041996031034,"balances":[0,1573.7218758324823,2195.4278700521686,2151.9195800396897],"balancesInvested":[0,1600,2260,2260]}}},
+        {"inputs":{"initial":1000,"monthly":50,"years":4,"personIncreaseRate":0.1,"personReturnRate":0,"personStartOffset":2,"personStopOffset":4,"scenarioRange":0.02,"useInflation":true,"inflationRate":0.05,"isHighlighted":true},"expected":{"result":{"finalBalance":1859.307593029653,"totalInvested":2260,"totalProfit":0,"balances":[0,1451.2471655328798,1952.2729726811358,1859.307593029653],"balancesInvested":[0,1600,2260,2260]},"bullResult":{"finalBalance":1952.8624404642444,"totalInvested":2260,"totalProfit":-307.1375595357556,"balances":[0,1626.724243910617,2326.7525016974573,2373.7165017745424],"balancesInvested":[0,1600,2260,2260]},"bearResult":{"finalBalance":1770.3895640517596,"totalInvested":2260,"totalProfit":-489.61043594824037,"balances":[0,1573.7218758324823,2195.4278700521686,2151.9195800396897],"balancesInvested":[0,1600,2260,2260]}}},
+        {"inputs":{"initial":1000,"monthly":50,"years":4,"personIncreaseRate":0.1,"personReturnRate":0.08,"personStartOffset":2,"personStopOffset":4,"scenarioRange":0.02,"useInflation":false,"inflationRate":0.05,"isHighlighted":true},"expected":{"result":{"finalBalance":2751.7462757879166,"totalInvested":2260,"totalProfit":491.7462757879166,"balances":[0,1709.6457832042158,2540.8564440620808,2751.7462757879166],"balancesInvested":[0,1600,2260,2260]},"bullResult":{"finalBalance":2891.153056863121,"totalInvested":2260,"totalProfit":631.153056863121,"balances":[0,1738.227125461145,2617.1076834996825,2891.153056863121],"balancesInvested":[0,1600,2260,2260]},"bearResult":{"finalBalance":2619.267164223152,"totalInvested":2260,"totalProfit":359.2671642231521,"balances":[0,1681.5398211027186,2467.101727993397,2619.267164223152],"balancesInvested":[0,1600,2260,2260]}}},
+        {"inputs":{"initial":1000,"monthly":50,"years":4,"personIncreaseRate":0.1,"personReturnRate":0.08,"personStartOffset":2,"personStopOffset":4,"scenarioRange":0.02,"useInflation":true,"inflationRate":0.05,"isHighlighted":true},"expected":{"result":{"finalBalance":2263.868471090063,"totalInvested":2260,"totalProfit":404.56087806041,"balances":[0,1550.699123087724,2194.8873288518134,2263.868471090063],"balancesInvested":[0,1600,2260,2260]},"bullResult":{"finalBalance":2378.558774883404,"totalInvested":2260,"totalProfit":118.55877488340411,"balances":[0,1738.227125461145,2617.1076834996825,2891.153056863121],"balancesInvested":[0,1600,2260,2260]},"bearResult":{"finalBalance":2154.8775781475015,"totalInvested":2260,"totalProfit":-105.12242185249852,"balances":[0,1681.5398211027186,2467.101727993397,2619.267164223152],"balancesInvested":[0,1600,2260,2260]}}}
+      ];
+
+      function assertProjection(actual, expected, label) {
+        for (const field of ['finalBalance', 'totalInvested', 'totalProfit']) {
+          assertNear(actual[field], expected[field], `${label}.${field}`);
+        }
+        for (const field of ['balances', 'balancesInvested']) {
+          if (actual[field].length !== expected[field].length) throw new Error(`${label}.${field} length`);
+          expected[field].forEach((value, index) => assertNear(actual[field][index], value, `${label}.${field}[${index}]`));
+        }
+      }
+
+      // Independent closed-form oracle: deposits occur before each month's growth.
+      // At zero return FV = P + n*M. Otherwise q = 1+r/12 and
+      // FV = P*q^n + M*q*(q^n-1)/(q-1), the sum of a geometric series.
+      // These fixtures have no contribution increases or start/stop offsets.
+      function householdFutureValue(initial, monthly, annualRate, year) {
+        const months = 12 * year;
+        if (annualRate === 0) return initial + months * monthly;
+        const q = 1 + annualRate / 12;
+        return initial * Math.pow(q, months)
+          + monthly * q * (Math.pow(q, months) - 1) / (q - 1);
+      }
+
+      function assertYearly(actual, expected, label) {
+        if (actual.length !== expected.length) throw new Error(`${label}: wrong year count`);
+        expected.forEach((value, index) => assertNear(actual[index], value, `${label}, year ${index + 1}`));
+      }
+
+      function expectedEuros(value) {
+        return '€' + new Intl.NumberFormat('nl-NL').format(Math.round(value));
+      }
+
+      function assertCardAmount(scope, label, expected) {
+        const card = [...scope.querySelectorAll('.card')]
+          .find(item => item.querySelector('h3')?.textContent.trim().startsWith(label));
+        const actual = card?.querySelector('p')?.textContent.trim();
+        if (actual !== expectedEuros(expected)) {
+          throw new Error(`${label}: expected ${expectedEuros(expected)}, got ${actual}`);
+        }
+      }
+
+      try {
+        for (const useInflation of [false, true]) {
+          await runCase(
+            `All-person combined totals: inflation ${useInflation ? 'on' : 'off'}`,
+            '2 years; A=(1000 initial,10/month,0%), B=(2000,20/month,12%), C=(3000,30/month,6%). Household=[1,2]; C excluded only from household. No contribution increases; inflation 10% when enabled; scenarios ±2pp.',
+            'F(P,M,r,y)=P+12y*M for r=0; otherwise q=1+r/12, F=P*q^(12y)+M*q*(q^(12y)-1)/(q-1). Base=sum F over ALL THREE, divided by 1.1^y when inflation is on. Invested=6000+24*60=7440 nominal; final profit=base-7440/(1.1^2 when enabled). Individual lines include C; household line excludes C.',
+            async () => {
+              const inputs = [[1,'All A',1000,10,0], [2,'All B',2000,20,.12], [3,'Excluded C',3000,30,.06]];
+              const { win, doc } = await loadPlan(plan('All-person characterization',
+                inputs.map(([id,name,initial,monthly,rate]) => ({ ...person(id,name,initial,monthly), returnRate: rate*100 })),
+                { years: 2, perPersonReturn: true, returnRate: 8, householdMembers: [1,2],
+                  useInflation, inflationRate: 10, scenarioRange: 2 }), 'calc_all_people');
+              const divisor = year => useInflation ? Math.pow(1.1,year) : 1;
+              const base = [1,2].map(year => inputs.reduce((sum, [, , p,m,r]) =>
+                sum + householdFutureValue(p,m,r,year),0) / divisor(year));
+              const invested = 6000 + 24*60;
+              const expected = { combinedFinal: base[1], combinedInvested: invested,
+                combinedProfit: base[1]-invested/divisor(2) };
+
+              function checkPublicResults() {
+                const summary = win.eval('portfolioSummaryData');
+                assertNear(summary.total, base[1], 'public all-person total');
+                if (summary.people.length !== 3) throw new Error('Portfolio summary excluded a person');
+                const chart = win.Chart.getChart(doc.getElementById('investmentChart'));
+                const sumOfPersonLines = [0,0];
+                for (const [id,name,p,m,r] of inputs) {
+                  const values = [1,2].map(y => householdFutureValue(p,m,r,y)/divisor(y));
+                  assertYearly(dataset(chart,name).data,values,name);
+                  assertNear(summary.people.find(p => p.id === id)?.balance,values[1],`${name} summary balance`);
+                  assertNear(personBalance(win,id),values[1],`${name} cached balance`);
+                  dataset(chart,name).data.forEach((value,i) => { sumOfPersonLines[i] += value; });
+                }
+                assertYearly(sumOfPersonLines,base,'sum of all individual chart lines');
+                const c = [1,2].map(y => householdFutureValue(3000,30,.06,y)/divisor(y));
+                assertYearly(dataset(chart,'Household').data,base.map((value,i) => value-c[i]),'household excludes C');
+                if (chart.data.datasets.length !== 4) throw new Error('Unexpected aggregate/scenario chart series in overview');
+                const cards = doc.getElementById('combinedResults');
+                assertCardAmount(cards,'Total Value',expected.combinedFinal);
+                assertCardAmount(cards,'Total Invested',invested);
+                assertCardAmount(cards,'Total Profit',expected.combinedProfit);
+                return JSON.stringify({ summary, datasets: chart.data.datasets.map(d => ({ label:d.label,data:d.data })), text:cards.textContent });
+              }
+              const before = checkPublicResults();
+
+              // Observe unrounded values at the existing formatting boundary while
+              // retaining the real formatter and checking the resulting summary cards.
+              // No controller source rewriting or private-local observation is needed.
+              const original = win.formatCurrency;
+              const formattedValues = [];
+              win.formatCurrency = function(value) {
+                formattedValues.push(value);
+                return original.apply(this, arguments);
+              };
+              try {
+                win.calculateInvestment();
+                const actual = {};
+                for (const [field,value] of Object.entries(expected)) {
+                  actual[field] = formattedValues.find(item => Number.isFinite(item) && Math.abs(item-value) <= tolerance);
+                  assertNear(actual[field],value,`${field} passed to display formatter`);
+                }
+                if (checkPublicResults() !== before) throw new Error('Observation changed public results');
+                return { actual, units: useInflation
+                  ? 'Base and profit: purchasing power; invested total: nominal.' : 'All nominal.',
+                  chartExposure: 'Individual lines and selected household only.' };
+              } finally {
+                win.formatCurrency = original;
+              }
+            }
+          );
+        }
+
+        await runCase(
+          'Household accumulator works without DOM, excludes nonmembers and preserves input results',
+          'Two supplied base results: A yearly [110,120], invested 120, profit 0; B [220,250], invested 220, profit 30. Bull yearly A [115,132], B [240,290]; bear A [105,108], B [210,225]. Repeat with base-only 10% inflation adjustment.',
+          'Base years [330,370], invested 340, profit 30; bull [355,422], bear [315,333]. With inflation divide base year y by 1.1^y and profit by 1.1^2, leaving invested and scenarios nominal. Excluded inputs add nothing; later source changes cannot alter accumulated numbers.',
+          async () => {
+            const url = new URL('householdCalculations.js', location.href).href;
+            const workerSource = `
+              importScripts(${JSON.stringify(url)});
+              onmessage = () => {
+                try {
+                  const cases = [false, true].map(inflation => {
+                    const totals = { householdFinal: 0, householdInvested: 0, householdProfit: 0,
+                      householdBalances: [0,0], householdBullFinal: 0, householdBearFinal: 0,
+                      householdBullBalances: [0,0], householdBearBalances: [0,0] };
+                    const empty = JSON.stringify(totals);
+                    if (accumulateHouseholdProjection(totals, { isMember: false }) !== totals
+                        || JSON.stringify(totals) !== empty) throw new Error('Empty selection changed');
+                    const divisor = y => inflation ? Math.pow(1.1, y) : 1;
+                    const a = { isMember: true,
+                      result: { finalBalance: 120/divisor(2), totalInvested: 120, totalProfit: 0, balances: [110/divisor(1),120/divisor(2)] },
+                      bullResult: { finalBalance: 132, balances: [115,132] },
+                      bearResult: { finalBalance: 108, balances: [105,108] } };
+                    const b = { isMember: true,
+                      result: { finalBalance: 250/divisor(2), totalInvested: 220, totalProfit: 30/divisor(2), balances: [220/divisor(1),250/divisor(2)] },
+                      bullResult: { finalBalance: 290, balances: [240,290] },
+                      bearResult: { finalBalance: 225, balances: [210,225] } };
+                    const before = JSON.stringify([a,b]);
+                    accumulateHouseholdProjection(totals, a);
+                    const afterA = JSON.parse(JSON.stringify(totals));
+                    accumulateHouseholdProjection(totals, { ...b, isMember: false });
+                    if (JSON.stringify(totals) !== JSON.stringify(afterA)) throw new Error('Excluded person contributed');
+                    if (accumulateHouseholdProjection(totals, b) !== totals) throw new Error('Accumulator identity changed');
+                    if (JSON.stringify([a,b]) !== before) throw new Error('Person results were mutated');
+                    const snapshot = JSON.stringify(totals);
+                    for (const input of [a,b]) {
+                      for (const key of ['result','bullResult','bearResult']) {
+                        input[key].finalBalance = -999;
+                        input[key].balances.fill(-999);
+                      }
+                    }
+                    if (JSON.stringify(totals) !== snapshot) throw new Error('Totals alias person results');
+                    return { inflation, afterA, totals };
+                  });
+                  postMessage({ cases, domFree: typeof document === 'undefined' && typeof window === 'undefined' });
+                } catch(error) { postMessage({ error: error.message }); }
+              };`;
+            const workerUrl = URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' }));
+            const worker = new Worker(workerUrl);
+            try {
+              const response = await new Promise((resolve, reject) => {
+                const timer = setTimeout(() => reject(new Error('Household worker timed out')), 12000);
+                worker.onmessage = event => { clearTimeout(timer); resolve(event.data); };
+                worker.onerror = event => { clearTimeout(timer); reject(new Error(event.message)); };
+                worker.postMessage(null);
+              });
+              if (response.error) throw new Error(response.error);
+              if (!response.domFree) throw new Error('Worker unexpectedly has a DOM');
+              for (const { inflation, afterA, totals } of response.cases) {
+                const d1 = inflation ? 1.1 : 1;
+                const d2 = inflation ? 1.21 : 1;
+                for (const [actual, expected] of [
+                  [afterA, { householdFinal: 120/d2, householdInvested: 120, householdProfit: 0,
+                    householdBalances: [110/d1,120/d2], householdBullFinal: 132, householdBearFinal: 108,
+                    householdBullBalances: [115,132], householdBearBalances: [105,108] }],
+                  [totals, { householdFinal: 370/d2, householdInvested: 340, householdProfit: 30/d2,
+                    householdBalances: [330/d1,370/d2], householdBullFinal: 422, householdBearFinal: 333,
+                    householdBullBalances: [355,422], householdBearBalances: [315,333] }]
+                ]) {
+                  for (const [key, value] of Object.entries(expected)) {
+                    if (Array.isArray(value)) assertYearly(actual[key], value, key);
+                    else assertNear(actual[key], value, key);
+                  }
+                }
+              }
+              return { ...response, excludesNonmembers: true, inputsUnchanged: true, noInputAliases: true };
+            } finally {
+              worker.terminate();
+              URL.revokeObjectURL(workerUrl);
+            }
+          }
+        );
+
+        for (const useInflation of [false, true]) {
+          for (const showScenarios of [false, true]) {
+            await runCase(
+              `Household mixed rates and excluded person: inflation ${useInflation ? 'on' : 'off'}, scenarios ${showScenarios ? 'on' : 'off'}`,
+              '2 years; household A=(1000 initial, 10/month, 0%), B=(2000, 20/month, 12%); excluded C=(3000, 30/month, 6%). No increases; inflation 10% when enabled; scenario range ±2pp; global rate 8%.',
+              'For year y, n=12y: FV(P,M,r)=P+nM at r=0, otherwise P*q^n+M*q*(q^n-1)/(q-1), q=1+r/12. Household base=(FV(A,0)+FV(B,.12))/1.1^y when inflation is on; invested=3000+30n (3720 at year 2). Profit=base-3720/1.1^2 when inflation is on. Bull=FV(A,.02)+FV(B,.14), bear=FV(A,-.02)+FV(B,.10); both remain NOMINAL even with inflation. C keeps FV(3000,30,.06), deflated when enabled, and never enters household sums.',
+              async () => {
+                const { win, doc, chart } = await loadPlan(plan('Household characterization', [
+                  { ...person(1, 'Household Zero', 1000, 10), returnRate: 0 },
+                  { ...person(2, 'Household Twelve', 2000, 20), returnRate: 12 },
+                  { ...person(3, 'Excluded Six', 3000, 30), returnRate: 6 }
+                ], { years: 2, perPersonReturn: true, returnRate: 8, householdMembers: [1, 2],
+                  useInflation, inflationRate: 10, scenarioRange: 2 }), 'calc_household_mixed');
+                const deflator = year => useInflation ? Math.pow(1.1, year) : 1;
+                const base = [1, 2].map(year => (householdFutureValue(1000, 10, 0, year)
+                  + householdFutureValue(2000, 20, .12, year)) / deflator(year));
+                const bull = [1, 2].map(year => householdFutureValue(1000, 10, .02, year)
+                  + householdFutureValue(2000, 20, .14, year));
+                const bear = [1, 2].map(year => householdFutureValue(1000, 10, -.02, year)
+                  + householdFutureValue(2000, 20, .10, year));
+                const invested = 1000 + 2000 + 24 * (10 + 20);
+                const profit = base[1] - invested / deflator(2);
+                const excluded = [1, 2].map(year => householdFutureValue(3000, 30, .06, year) / deflator(year));
+
+                // Normal view: household selection, individual projections and rounded cards.
+                assertYearly(dataset(chart, 'Household').data, base, 'normal household base');
+                for (const [id, name, initial, monthly, rate] of [
+                  [1, 'Household Zero', 1000, 10, 0], [2, 'Household Twelve', 2000, 20, .12],
+                  [3, 'Excluded Six', 3000, 30, .06]
+                ]) {
+                  const expected = [1, 2].map(year => householdFutureValue(initial, monthly, rate, year) / deflator(year));
+                  assertYearly(dataset(chart, name).data, expected, name);
+                  assertNear(personBalance(win, id), expected[1], `${name} cached final`);
+                }
+                const householdCard = doc.querySelector('#personResults .household-box');
+                if (!householdCard) throw new Error('Missing household card');
+                assertCardAmount(householdCard, 'Total Value', base[1]);
+                assertCardAmount(householdCard, 'Total Invested', invested);
+                assertCardAmount(householdCard, 'Total Profit', profit);
+                const excludedCard = [...doc.querySelectorAll('#personResults .results-section')]
+                  .find(section => section.querySelector('.person-result-title')?.textContent.includes('Excluded Six'));
+                if (!excludedCard) throw new Error('Missing excluded person card');
+                assertCardAmount(excludedCard, 'Total Value', excluded[1]);
+                assertCardAmount(doc.getElementById('combinedResults'), 'Total Value', base[1] + excluded[1]);
+
+                // Observe unrounded household totals at the existing rendering boundary.
+                // Do not expose locals, replace calculations, or alter production code.
+                const render = win.renderTopSummary;
+                let totals;
+                win.renderTopSummary = function(name, dots, values, inflation) {
+                  if (name === 'Household Portfolio') totals = { ...values };
+                  return render.apply(this, arguments);
+                };
+                try {
+                  win.highlightTarget('combined');
+                  win.eval(`showScenarios = ${showScenarios}`);
+                  win.calculateInvestment();
+                  if (!totals) throw new Error('Missing household summary values');
+                  for (const [field, expected] of Object.entries({ base: base[1], bull: bull[1], bear: bear[1], invested, profit })) {
+                    assertNear(totals[field], expected, `household summary ${field}`);
+                  }
+                  const analysisChart = win.Chart.getChart(doc.getElementById('investmentChart'));
+                  assertYearly(dataset(analysisChart, showScenarios ? 'Base Case' : 'Household — Portfolio Value').data, base, 'analysis household base');
+                  assertYearly(dataset(analysisChart, 'Household — Invested Capital').data,
+                    [1, 2].map(year => (3000 + 12 * year * 30) / deflator(year)), 'purchasing-power invested chart');
+                  if (showScenarios) {
+                    assertYearly(dataset(analysisChart, 'Bull Case').data, bull, 'nominal household bull');
+                    assertYearly(dataset(analysisChart, 'Bear Case').data, bear, 'nominal household bear');
+                  } else if (analysisChart.data.datasets.some(item => ['Bull Case', 'Bear Case'].includes(item.label))) {
+                    throw new Error('Scenario series present while disabled');
+                  }
+                  for (const [label, expected] of [['Total Value', base[1]], ['Total Invested', invested], ['Total Profit', profit]]) {
+                    assertCardAmount(doc.getElementById('combinedResults'), label, expected);
+                  }
+                  assertNear(personBalance(win, 3), excluded[1], 'excluded person retains final in household analysis');
+                  return { totals, baseYearly: base, nominalBullYearly: bull, nominalBearYearly: bear,
+                    excludedYearly: excluded, investedCard: expectedEuros(invested),
+                    units: useInflation ? 'Base/profit: purchasing power; bull/bear and invested total: nominal; invested chart: purchasing power.' : 'All nominal.' };
+                } finally {
+                  win.renderTopSummary = render;
+                }
+              }
+            );
+          }
+        }
+
+        await runCase(
+          'Person projection works without a DOM and skips unselected scenarios',
+          'Original 0%/8% snapshots, inflation off/on; highlighted and unhighlighted; delayed/increased/stopped contributions.',
+          'All five fields match original numeric snapshots; unhighlighted bull/bear are null; inputs are unchanged.',
+          async () => {
+            const urls = ['simulateInvestment.js', 'investmentCalculations.js'].map(file => new URL(file, location.href).href);
+            const workerSource = `
+              importScripts(...${JSON.stringify(urls)});
+              onmessage = event => {
+                try {
+                  const actual = event.data.map(inputs => {
+                    const before = JSON.stringify(inputs);
+                    const highlighted = calculatePersonProjection(inputs);
+                    const unhighlighted = calculatePersonProjection({ ...inputs, isHighlighted: false });
+                    if (JSON.stringify(inputs) !== before) throw new Error('Projection changed its inputs');
+                    return { highlighted, unhighlighted };
+                  });
+                  postMessage({ actual, domFree: typeof document === 'undefined' && typeof window === 'undefined' });
+                } catch (error) { postMessage({ error: error.message }); }
+              };`;
+            const workerUrl = URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' }));
+            const worker = new Worker(workerUrl);
+            try {
+              const response = await new Promise((resolve, reject) => {
+                const timer = setTimeout(() => reject(new Error('Projection worker timed out')), 12000);
+                worker.onmessage = event => { clearTimeout(timer); resolve(event.data); };
+                worker.onerror = event => { clearTimeout(timer); reject(new Error(event.message)); };
+                worker.postMessage(projectionFixtures.map(fixture => fixture.inputs));
+              });
+              if (response.error) throw new Error(response.error);
+              if (!response.domFree) throw new Error('Worker unexpectedly has a DOM');
+              response.actual.forEach((actual, index) => {
+                const expected = projectionFixtures[index].expected;
+                for (const key of ['result', 'bullResult', 'bearResult']) {
+                  assertProjection(actual.highlighted[key], expected[key], `fixture ${index} ${key}`);
+                }
+                assertProjection(actual.unhighlighted.result, expected.result, `fixture ${index} unhighlighted`);
+                if (actual.unhighlighted.bullResult !== null || actual.unhighlighted.bearResult !== null) {
+                  throw new Error('Unhighlighted projection calculated scenarios');
+                }
+              });
+              return { fixtures: response.actual.length, domFree: response.domFree, unchangedInputs: true };
+            } finally {
+              worker.terminate();
+              URL.revokeObjectURL(workerUrl);
+            }
+          }
+        );
+
+        for (const fixture of projectionFixtures) {
+          const inputs = fixture.inputs;
+          await runCase(
+            `Extracted controller projection: ${inputs.personReturnRate * 100}% return, inflation ${inputs.useInflation ? 'on' : 'off'}`,
+            JSON.stringify(inputs),
+            'Base and highlighted bull/bear match all original numeric fields; chart yearly base values match.',
+            async () => {
+              const { win, doc } = await loadPlan(plan('Projection extraction', [
+                { ...person(1, 'Projection', inputs.initial, inputs.monthly, inputs.personIncreaseRate * 100),
+                  returnRate: inputs.personReturnRate * 100, startOffset: inputs.personStartOffset, stopOffset: inputs.personStopOffset },
+                { ...person(2, 'Other', 0, 0), returnRate: 8 }
+              ], { years: inputs.years, perPersonReturn: true, returnRate: 8,
+                useInflation: inputs.useInflation, inflationRate: inputs.inflationRate * 100, scenarioRange: inputs.scenarioRange * 100 }), 'calc_projection');
+              const calculate = win.calculatePersonProjection;
+              let captured;
+              win.calculatePersonProjection = function(values) {
+                const projection = calculate(values);
+                if (values.isHighlighted) captured = projection;
+                return projection;
+              };
+              try {
+                win.highlightTarget(1);
+                win.eval('showScenarios = true');
+                win.calculateInvestment();
+                if (!captured) throw new Error('Controller did not request highlighted projection');
+                for (const key of ['result', 'bullResult', 'bearResult']) {
+                  assertProjection(captured[key], fixture.expected[key], key);
+                }
+                assertNear(personBalance(win, 1), fixture.expected.result.finalBalance, 'cached final balance');
+                const chart = win.Chart.getChart(doc.getElementById('investmentChart'));
+                const base = dataset(chart, 'Base Case');
+                fixture.expected.result.balances.forEach((value, index) => assertNear(base.data[index], value, `base chart year ${index + 1}`));
+                return captured;
+              } finally {
+                win.calculatePersonProjection = calculate;
+              }
+            }
+          );
+        }
+        await runCase(
+          'Per-person zero and eight percent survive save and reload',
+          'Two people: initial 1000, monthly 0, one year; personal rates 0% and 8%; global 8%.',
+          'Zero stays 1000; eight becomes 1000 * (1 + .08/12)^12; saved and reloaded rates remain 0 and 8.',
+          async () => {
+            let app = await loadPlan(plan('Personal rates', [
+              { ...person(1, 'Zero', 1000, 0), returnRate: 0 },
+              { ...person(2, 'Eight', 1000, 0), returnRate: 8 }
+            ], { perPersonReturn: true, scenarioRange: 0 }), 'calc_personal');
+            const expectedEight = 1000 * Math.pow(1 + .08 / 12, 12);
+            const before = [personBalance(app.win, 1), personBalance(app.win, 2)];
+            assertNear(before[0], 1000, 'zero personal rate');
+            assertNear(before[1], expectedEight, 'eight personal rate');
+            app.win.saveCurrentToPlan(true);
+            const saved = JSON.parse(localStorage.getItem('investment_plans')).calc_personal;
+            assertNear(saved.people[0].returnRate, 0, 'saved zero');
+            assertNear(saved.people[1].returnRate, 8, 'saved eight');
+            app = await reloadAppFromExistingStorage();
+            for (const id of [1, 2, 1]) {
+              app.win.highlightTarget(id);
+              assertNear(Number(app.doc.getElementById(`returnRate-${id}`).value), id === 1 ? 0 : 8, 'rate after selection');
+              assertNear(personBalance(app.win, id), id === 1 ? 1000 : expectedEight, 'balance after selection');
+            }
+            return { before, savedRates: saved.people.map(p => p.returnRate) };
+          }
+        );
+
+        await runCase(
+          'Personal rate creation inherits finite global zero',
+          'Global rate 0%; add a person, restore a legacy person, and toggle personal rates off/on.',
+          'Each newly created rate input is 0%.',
+          async () => {
+            const { win, doc } = await loadPlan(plan('Creation', [person(1, 'First', 1000, 0), person(2, 'Second', 1000, 0)], { perPersonReturn: true }), 'calc_creation');
+            setInput(win, doc, 'returnRate', 0);
+            win.addPerson();
+            const added = Number(doc.getElementById('returnRate-3').value);
+            win.createPersonFromData(person(4, 'Legacy', 1000, 0));
+            const restored = Number(doc.getElementById('returnRate-4').value);
+            doc.getElementById('perPersonReturn').checked = false;
+            win.toggleReturnRateMode();
+            doc.getElementById('perPersonReturn').checked = true;
+            win.toggleReturnRateMode();
+            const toggled = Number(doc.getElementById('returnRate-1').value);
+            if (added !== 0 || restored !== 0 || toggled !== 0) throw new Error(JSON.stringify({ added, restored, toggled }));
+            return { added, restored, toggled };
+          }
+        );
+
+        await runCase(
+          'Missing or invalid personal rate defaults to eight',
+          'Initial 1000, monthly 0, one year; empty, invalid, or absent personal input.',
+          'Each calculation uses 8%; empty saved input retains the existing null storage representation.',
+          async () => {
+            const { win, doc } = await loadPlan(plan('Fallback', [person(1, 'Fallback', 1000, 0), person(2, 'Other', 1000, 0)], { perPersonReturn: true }), 'calc_fallback');
+            const expected = 1000 * Math.pow(1 + .08 / 12, 12);
+            for (const value of [undefined, null, '', 'invalid', Infinity, -Infinity, NaN]) {
+              assertNear(win.parsePersonReturnRate(value), 8, 'non-finite rate fallback');
+            }
+            assertNear(win.parsePersonReturnRate(0), 0, 'finite zero');
+            assertNear(win.parsePersonReturnRate(8), 8, 'finite eight');
+            for (const value of ['', 'invalid', 'Infinity']) {
+              setInput(win, doc, 'returnRate-1', value);
+              assertNear(personBalance(win, 1), expected, `fallback for ${value}`);
+            }
+            win.saveCurrentToPlan(true);
+            const saved = JSON.parse(localStorage.getItem('investment_plans')).calc_fallback;
+            if (saved.people[0].returnRate !== null) throw new Error('Empty rate storage changed');
+            doc.getElementById('returnRate-1').remove();
+            win.calculateInvestment();
+            assertNear(personBalance(win, 1), expected, 'missing input fallback');
+            const reloaded = await reloadAppFromExistingStorage();
+            assertNear(personBalance(reloaded.win, 1), expected, 'reloaded null rate fallback');
+            return { expected, actual: personBalance(reloaded.win, 1), savedRate: saved.people[0].returnRate };
+          }
+        );
+
+        await runCase(
+          'One person, zero return',
+          '1 year; initial 100; monthly 10; annual increase 0%; return 0%; inflation off.',
+          'End balance and invested amount are 100 + 12 × 10 = 220.',
+          async () => {
+            const { win, doc, chart } = await loadPlan(
+              plan('Zero return', [person(1, 'Zero Person', 100, 10, 0)], { years: 1, scenarioRange: 0 }),
+              'calc_zero'
+            );
+            setInput(win, doc, 'returnRate', 0);
+            const expected = 100 + 12 * 10;
+            assertNear(personBalance(win, 1), expected, 'person final balance');
+            assertNear(dataset(chart, 'Zero Person').data[0], expected, 'person chart value');
+            if (resultCardValue(doc, 'Total Value') !== '€220') throw new Error('Rendered total value was not €220');
+            if (resultCardValue(doc, 'Total Invested') !== '€220') throw new Error('Rendered invested total was not €220');
+            return {
+              personFinalBalance: personBalance(win, 1),
+              chartFinal: dataset(chart, 'Zero Person').data[0],
+              renderedTotal: resultCardValue(doc, 'Total Value'),
+              renderedInvested: resultCardValue(doc, 'Total Invested')
+            };
+          }
+        );
+
+        await runCase(
+          'Selected household and excluded person',
+          '1 year; zero return/increase; A=(100 initial, 10 monthly), B=(200, 20), C=(300, 30); household IDs [1,2].',
+          'A=220, B=440, C=660; household value and invested amount are A+B=660; C retains their separate 660 result.',
+          async () => {
+            const { win, doc, chart } = await loadPlan(
+              plan('Household selection', [
+                person(1, 'Household A', 100, 10),
+                person(2, 'Household B', 200, 20),
+                person(3, 'Excluded C', 300, 30)
+              ], { years: 1, householdMembers: [1, 2] }),
+              'calc_household'
+            );
+            setInput(win, doc, 'returnRate', 0);
+            const a = 100 + 12 * 10;
+            const b = 200 + 12 * 20;
+            const c = 300 + 12 * 30;
+            assertNear(personBalance(win, 1), a, 'person A balance');
+            assertNear(personBalance(win, 2), b, 'person B balance');
+            assertNear(personBalance(win, 3), c, 'excluded person balance');
+            const household = dataset(chart, 'Household');
+            assertNear(household.data[0], a + b, 'selected household chart value');
+            const householdText = doc.querySelector('#personResults .household-box')?.innerText || '';
+            if (!/Total Value\s*€660/.test(householdText) || !/Total Invested\s*€660/.test(householdText)) {
+              throw new Error('Household card did not show €660 total value and invested amount');
+            }
+            const excludedCard = [...doc.querySelectorAll('#personResults .results-section')]
+              .find(section => section.querySelector('.person-result-title')?.textContent.includes('Excluded C'));
+            if (!excludedCard?.innerText.includes('€660')) throw new Error('Excluded person result was not rendered');
+            return { personBalances: [a, b, c], householdFinal: household.data[0], householdCard: householdText };
+          }
+        );
+
+        await runCase(
+          'One-year purchasing-power adjustment',
+          '1 year; initial 1000; monthly 0; return 0%; inflation 10%.',
+          'Adjusted final balance is 1000 / 1.10 = 909.090909...; the invested card remains nominal at 1000; current profit is 909.090909... - (1000 / 1.10) = 0.',
+          async () => {
+            const { win, doc, chart } = await loadPlan(
+              plan('Inflation', [person(1, 'Inflation Person', 1000, 0)], {
+                years: 1, useInflation: true, inflationRate: 10, scenarioRange: 0
+              }),
+              'calc_inflation'
+            );
+            setInput(win, doc, 'returnRate', 0);
+            const expected = 1000 / 1.10;
+            assertNear(personBalance(win, 1), expected, 'inflation-adjusted person balance');
+            assertNear(dataset(chart, 'Inflation Person').data[0], expected, 'inflation-adjusted chart value');
+            if (resultCardValue(doc, 'Total Value') !== '€909') throw new Error('Purchasing-power total was not rendered as €909');
+            if (resultCardValue(doc, 'Total Invested') !== '€1.000') {
+              throw new Error('Nominal invested total was not preserved as €1.000');
+            }
+            if (resultCardValue(doc, 'Total Profit') !== '€0') throw new Error('Existing inflation-adjusted profit result was not rendered as €0');
+            return {
+              expected,
+              personFinalBalance: personBalance(win, 1),
+              chartFinal: dataset(chart, 'Inflation Person').data[0],
+              renderedTotal: resultCardValue(doc, 'Total Value'),
+              renderedNominalInvested: resultCardValue(doc, 'Total Invested'),
+              renderedProfit: resultCardValue(doc, 'Total Profit')
+            };
+          }
+        );
+
+        await runCase(
+          'Bull/base/bear scenario ordering',
+          '1 year; initial 1000; monthly 0; global return 8%; scenario range ±2 percentage points; inflation off.',
+          'For each annual rate r, final balance is 1000 × (1 + r/12)^12; bull (10%) ≥ base (8%) ≥ bear (6%).',
+          async () => {
+            const { win, doc } = await loadPlan(
+              plan('Scenario ordering', [person(1, 'Scenario Person', 1000, 0)], {
+                years: 1, returnRate: 8, scenarioRange: 2
+              }),
+              'calc_scenarios'
+            );
+            win.highlightTarget(1);
+            win.eval('showScenarios = true');
+            win.calculateInvestment();
+            const chart = win.Chart.getChart(doc.getElementById('investmentChart'));
+            const bull = dataset(chart, 'Bull Case').data[0];
+            const base = dataset(chart, 'Base Case').data[0];
+            const bear = dataset(chart, 'Bear Case').data[0];
+            const expectedBull = 1000 * Math.pow(1 + 0.10 / 12, 12);
+            const expectedBase = 1000 * Math.pow(1 + 0.08 / 12, 12);
+            const expectedBear = 1000 * Math.pow(1 + 0.06 / 12, 12);
+            assertNear(bull, expectedBull, 'bull scenario chart value');
+            assertNear(base, expectedBase, 'base scenario chart value');
+            assertNear(bear, expectedBear, 'bear scenario chart value');
+            if (!(bull >= base && base >= bear)) throw new Error('Scenario ordering was not bull ≥ base ≥ bear');
+            return { bull, base, bear };
+          }
+        );
+
+        await runCase(
+          'Zero and ordinary global return save/reload',
+          '1 year; initial 1000; monthly 0; save at 0%, then at 8%; inflation off.',
+          'Input and saved setting remain 0 after save/reload, with final value 1000. At 8%, the same plan gives 1000 × (1 + 0.08/12)^12 = 1082.999507.',
+          async () => {
+            let app = await loadPlan(
+              plan('Return persistence', [person(1, 'Return Person', 1000, 0)], {
+                years: 1, returnRate: 8, scenarioRange: 0
+              }),
+              'calc_return_persistence'
+            );
+            setInput(app.win, app.doc, 'returnRate', 0);
+            const savedZero = JSON.parse(localStorage.getItem('investment_plans')).calc_return_persistence.settings.returnRate;
+            assertNear(savedZero, 0, 'saved zero return rate');
+            app = await reloadAppFromExistingStorage();
+            assertNear(Number(app.doc.getElementById('returnRate').value), 0, 'reloaded zero return input');
+            assertNear(dataset(app.chart, 'Return Person').data[0], 1000, 'zero-return projection');
+
+            setInput(app.win, app.doc, 'returnRate', 8);
+            const savedEight = JSON.parse(localStorage.getItem('investment_plans')).calc_return_persistence.settings.returnRate;
+            assertNear(savedEight, 8, 'saved ordinary return rate');
+            app = await reloadAppFromExistingStorage();
+            const expectedEight = 1000 * Math.pow(1 + 0.08 / 12, 12);
+            assertNear(Number(app.doc.getElementById('returnRate').value), 8, 'reloaded ordinary return input');
+            assertNear(dataset(app.chart, 'Return Person').data[0], expectedEight, 'ordinary-return projection');
+            return { savedZero, reloadedZero: 0, savedEight, reloadedEight: 8, expectedEight, finalAtEight: dataset(app.chart, 'Return Person').data[0] };
+          }
+        );
+
+        await runCase(
+          'Missing and invalid return use default',
+          '1 year; initial 1000; monthly 0; saved returnRate missing, then malformed string.',
+          'Both missing and non-numeric stored rates load as the existing 8% default; projected final is 1000 × (1 + 0.08/12)^12 = 1082.999507.',
+          async () => {
+            const testPlan = plan('Return fallback', [person(1, 'Fallback Person', 1000, 0)], { years: 1, returnRate: 8 });
+            delete testPlan.settings.returnRate;
+            let app = await loadPlan(testPlan, 'calc_return_fallback');
+            const expected = 1000 * Math.pow(1 + 0.08 / 12, 12);
+            assertNear(Number(app.doc.getElementById('returnRate').value), 8, 'missing return-rate default');
+            assertNear(dataset(app.chart, 'Fallback Person').data[0], expected, 'missing-rate projection');
+
+            testPlan.settings.returnRate = 'not-a-rate';
+            app = await loadPlan(testPlan, 'calc_return_fallback');
+            assertNear(Number(app.doc.getElementById('returnRate').value), 8, 'invalid return-rate default');
+            assertNear(dataset(app.chart, 'Fallback Person').data[0], expected, 'invalid-rate projection');
+            return { missingLoadedRate: 8, invalidLoadedRate: 8, expected, actual: dataset(app.chart, 'Fallback Person').data[0] };
+          }
+        );
+
+        await runCase(
+          'Zero inflation and scenario range persist',
+          '1 year; initial 1000; monthly 0; return 8%; inflation enabled at 0%; scenario range 0%, then ordinary 2.5% and 2%.',
+          'Zero inflation and range remain zero after save/reload; with a zero range, bull/base/bear are identical. Nonzero values reload as 2.5% and 2%.',
+          async () => {
+            let app = await loadPlan(
+              plan('Other zero settings', [person(1, 'Zero Fields Person', 1000, 0)], {
+                years: 1, returnRate: 8, useInflation: true, inflationRate: 2.5, scenarioRange: 2
+              }),
+              'calc_other_zero_settings'
+            );
+            assertNear(Number(app.doc.getElementById('inflationRate').value), 2.5, 'ordinary inflation default');
+            assertNear(Number(app.doc.getElementById('scenarioRange').value), 2, 'ordinary scenario range');
+            setInput(app.win, app.doc, 'inflationRate', 0);
+            setInput(app.win, app.doc, 'scenarioRange', 0);
+            const saved = JSON.parse(localStorage.getItem('investment_plans')).calc_other_zero_settings.settings;
+            assertNear(saved.inflationRate, 0, 'saved zero inflation rate');
+            assertNear(saved.scenarioRange, 0, 'saved zero scenario range');
+            app = await reloadAppFromExistingStorage();
+            assertNear(Number(app.doc.getElementById('inflationRate').value), 0, 'reloaded zero inflation rate');
+            assertNear(Number(app.doc.getElementById('scenarioRange').value), 0, 'reloaded zero scenario range');
+            app.win.highlightTarget(1);
+            app.win.eval('showScenarios = true');
+            app.win.calculateInvestment();
+            const chart = app.win.Chart.getChart(app.doc.getElementById('investmentChart'));
+            const bull = dataset(chart, 'Bull Case').data[0];
+            const base = dataset(chart, 'Base Case').data[0];
+            const bear = dataset(chart, 'Bear Case').data[0];
+            assertNear(bull, base, 'zero-range bull/base equality');
+            assertNear(base, bear, 'zero-range base/bear equality');
+
+            const ordinaryPlan = plan('Ordinary other settings', [person(1, 'Ordinary Fields Person', 1000, 0)], {
+              years: 1, returnRate: 8, useInflation: true, inflationRate: 2.5, scenarioRange: 2
+            });
+            app = await loadPlan(ordinaryPlan, 'calc_other_nonzero_settings');
+            assertNear(Number(app.doc.getElementById('inflationRate').value), 2.5, 'reloaded ordinary inflation rate');
+            assertNear(Number(app.doc.getElementById('scenarioRange').value), 2, 'reloaded ordinary scenario range');
+            return { savedZero: { inflationRate: saved.inflationRate, scenarioRange: saved.scenarioRange }, reloadedZero: { inflationRate: 0, scenarioRange: 0 }, equalScenarioValues: [bull, base, bear], ordinaryReload: { inflationRate: 2.5, scenarioRange: 2 } };
+          }
+        );
+
+        await runCase(
+          'Plan reload restores inputs/results',
+          '1 year; initial 1000; monthly 0; return 5%; inflation off.',
+          'Expected final value is 1000 × (1 + 0.05/12)^12; after an unsaved DOM edit and reload, saved inputs and the same result return.',
+          async () => {
+            const testPlan = plan('Reload', [person(1, 'Reload Person', 1000, 0)], {
+              years: 1, returnRate: 5, scenarioRange: 0
+            });
+            let app = await loadPlan(testPlan, 'calc_reload');
+            const expected = 1000 * Math.pow(1 + 0.05 / 12, 12);
+            const first = personBalance(app.win, 1);
+            assertNear(first, expected, 'pre-reload calculated balance');
+            app.doc.getElementById('initial-1').value = '9999';
+            app = await reloadAppFromExistingStorage();
+            const restoredInitial = Number(app.doc.getElementById('initial-1').value);
+            const restoredYears = Number(app.doc.getElementById('years').value);
+            const restoredMonthly = Number(app.doc.getElementById('monthly-1').value);
+            const restoredReturnRate = Number(app.doc.getElementById('returnRate').value);
+            const afterReload = personBalance(app.win, 1);
+            assertNear(restoredInitial, 1000, 'restored initial input');
+            assertNear(restoredYears, 1, 'restored years input');
+            assertNear(restoredMonthly, 0, 'restored monthly contribution');
+            assertNear(restoredReturnRate, 5, 'restored return rate');
+            assertNear(afterReload, expected, 'post-reload calculated balance');
+            assertNear(afterReload, first, 'pre/post reload result');
+            return { expected, first, afterReload, restoredInitial, restoredMonthly, restoredYears, restoredReturnRate };
+          }
+        );
+      } finally {
+        frame.remove();
+        if (previousPlans === null) localStorage.removeItem('investment_plans');
+        else localStorage.setItem('investment_plans', previousPlans);
+        if (previousActiveId === null) localStorage.removeItem('investment_activePlanId');
+        else localStorage.setItem('investment_activePlanId', previousActiveId);
+      }
+
+      const failures = checks.filter(check => !check.passed);
+      status.className = failures.length ? 'fail' : 'pass';
+      status.textContent = `${failures.length ? 'FAILED' : 'PASS'} (${checks.length - failures.length}/${checks.length})\n\n`
+        + checks.map(check => `${check.passed ? 'PASS' : 'FAIL'} ${check.name}\nInputs: ${check.inputs}\nExpected: ${check.expectation}\nActual: ${typeof check.actual === 'string' ? check.actual : JSON.stringify(check.actual)}`).join('\n\n');
+    })().catch(error => {
+      const status = document.getElementById('status');
+      status.className = 'fail';
+      status.textContent = `TEST RUNNER ERROR: ${error.stack || error.message}`;
+    });
+  </script>
+</body>
+</html>

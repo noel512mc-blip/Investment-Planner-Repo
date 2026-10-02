@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Milestone retirement checks</title>
+  <style>
+    body { max-width: 900px; margin: 32px auto; padding: 0 20px; font: 14px/1.5 system-ui, sans-serif; color: #1f2937; }
+    h1 { font-size: 22px; }
+    #status { padding: 12px; background: #f3f4f6; border-radius: 6px; white-space: pre-wrap; }
+    #status.pass { background: #ecfdf5; color: #065f46; }
+    #status.fail { background: #fef2f2; color: #991b1b; }
+    iframe { position: fixed; left: -1400px; top: 0; width: 1280px; height: 900px; border: 0; }
+  </style>
+  <script src="./retirementCalculations.js"></script>
+</head>
+<body>
+  <h1>Milestone retirement characterization</h1>
+  <p>This standalone suite drives the real planner in an iframe and asserts displayed retirement rows and status changes. From PowerShell at the workspace root, run <code>Get-Content .\js\serveAppCalculationTests.ps1 -Raw | Invoke-Expression</code>, then open <code>http://127.0.0.1:8765/js/retirementCalculation.test.html</code>. Press Ctrl+C to stop the server. It refuses to run from <code>file://</code> so normal planner storage is not touched.</p>
+  <div id="status">Starting retirement checks...</div>
+  <iframe id="planner" title="Isolated planner under test"></iframe>
+  <script>
+    (async function() {
+      const status = document.getElementById('status');
+      const frame = document.getElementById('planner');
+      const tolerance = 1e-6;
+      const checks = [];
+
+      if (location.protocol !== 'http:' || !['localhost', '127.0.0.1'].includes(location.hostname)) {
+        status.className = 'fail';
+        status.textContent = 'NOT RUN: open this page from a localhost web server to keep planner storage isolated.';
+        return;
+      }
+
+      const previousPlans = localStorage.getItem('investment_plans');
+      const previousActiveId = localStorage.getItem('investment_activePlanId');
+
+      function retirement(overrides = {}) {
+        return {
+          currentAge: 30,
+          withdrawalGoal: 5000,
+          withdrawalRate: 4,
+          statePensionEnabled: true,
+          statePensionAge: 67,
+          statePensionIncome: 0,
+          additionalIncomeSources: [],
+          ...overrides
+        };
+      }
+
+      function person(id, name, initial, monthly, retirementSettings, increaseRate = 0) {
+        return {
+          id, name, initial, monthly, increaseRate, startOffset: 1, stopOffset: 0,
+          returnRate: null, retirementSettings
+        };
+      }
+
+      function plan(name, people, options = {}) {
+        return {
+          name,
+          people,
+          settings: {
+            years: 1,
+            increaseRate: 2,
+            returnRate: 0,
+            perPersonReturn: false,
+            useInflation: false,
+            inflationRate: 0,
+            scenarioRange: 0,
+            currentAge: 30,
+            retirementAge: 67,
+            noStatePension: false,
+            withdrawalGoal: 5000,
+            withdrawalRate: 4,
+            statePensionIncome: 0,
+            householdMembers: [],
+            currency: '€',
+            startYear: 0,
+            ...options
+          }
+        };
+      }
+
+      function assert(condition, description) {
+        if (!condition) throw new Error(description);
+      }
+
+      function assertNear(actual, expected, description) {
+        if (!Number.isFinite(actual) || Math.abs(actual - expected) > tolerance) {
+          throw new Error(`${description}: expected ${expected}, got ${actual} (tolerance ${tolerance})`);
+        }
+      }
+
+      function record(name, inputs, expectation, actual) {
+        checks.push({ name, inputs, expectation, actual, passed: true });
+      }
+
+      async function waitFor(predicate, description, timeout = 15000) {
+        const deadline = Date.now() + timeout;
+        while (Date.now() < deadline) {
+          if (predicate()) return;
+          await new Promise(resolve => setTimeout(resolve, 40));
+        }
+        throw new Error(`Timed out waiting for ${description}`);
+      }
+
+      async function navigateFrame(query = '') {
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('Planner iframe load timed out')), 20000);
+          frame.onload = () => { clearTimeout(timer); resolve(); };
+          frame.onerror = () => { clearTimeout(timer); reject(new Error('Planner iframe failed to load')); };
+          frame.src = `../index.html?retirementTest=${Date.now()}${query}`;
+        });
+        const win = frame.contentWindow;
+        const doc = win.document;
+        await waitFor(() => win.Chart && win.Chart.getChart(doc.getElementById('investmentChart')), 'main chart');
+        return { win, doc };
+      }
+
+      async function loadPlan(testPlan, id) {
+        localStorage.setItem('investment_plans', JSON.stringify({ [id]: testPlan }));
+        localStorage.setItem('investment_activePlanId', id);
+        return navigateFrame();
+      }
+
+      function setGlobalReturn(app, percent) {
+        const input = app.doc.getElementById('returnRate');
+        input.value = String(percent);
+        input.dispatchEvent(new app.win.Event('input', { bubbles: true }));
+      }
+
+      function rowAtAge(doc, age) {
+        const row = [...doc.querySelectorAll('.ret-table-row')]
+          .find(item => Number(item.children[0].textContent.match(/\d+/)?.[0]) === age);
+        if (!row) throw new Error(`Missing retirement table row for age ${age}`);
+        return row;
+      }
+
+      function cellText(row, column) {
+        return row.children[column].textContent.replace(/\s+/g, ' ').trim();
+      }
+
+      function goalMet(row) {
+        const dot = row.children[4].querySelector('span');
+        return dot && getComputedStyle(dot).backgroundColor === 'rgb(16, 185, 129)';
+      }
+
+      async function selectRetirementPerson(app, personName) {
+        app.doc.querySelector('.analysis-entry-section button')?.click();
+        await waitFor(() => app.doc.getElementById('analysisSelectionModal'), 'analysis selection popup');
+        const card = [...app.doc.querySelectorAll('.analysis-select-card')]
+          .find(item => item.textContent.includes(personName));
+        if (!card) throw new Error(`Missing analysis selection for ${personName}`);
+        card.click();
+        await waitFor(() => app.win.eval(`highlightedTarget !== null`), `${personName} analysis selection`);
+        const retirementButton = [...app.doc.querySelectorAll('#analysisTabs button')]
+          .find(button => button.textContent.includes('Retirement Planner'));
+        if (!retirementButton) throw new Error('Missing Retirement Planner tab');
+        retirementButton.click();
+        await waitFor(() => app.win.eval(`analysisTab === 'retirement'`) && app.doc.querySelector('.retirement-analytics-card'), 'retirement table');
+      }
+
+      async function exitAnalysis(app) {
+        const button = app.doc.querySelector('.exit-analysis-btn');
+        if (!button) throw new Error('Missing Exit Analysis control');
+        button.click();
+        await waitFor(() => app.win.eval('highlightedTarget === null'), 'analysis exit');
+      }
+
+      function readRetirementInputs(doc) {
+        return {
+          currentAge: Number(doc.getElementById('currentAge').value),
+          withdrawalGoal: Number(doc.getElementById('withdrawalGoal').value),
+          withdrawalRate: Number(doc.getElementById('withdrawalRate').value),
+          statePensionEnabled: doc.getElementById('statePensionEnabled').checked,
+          statePensionAge: Number(doc.getElementById('retirementAge').value),
+          statePensionIncome: Number(doc.getElementById('statePensionIncome').value || 0),
+          additionalIncomeSources: [...doc.querySelectorAll('.ret-income-card')].map(card => ({
+            label: card.querySelector('.ret-income-label').value,
+            amount: Number(card.querySelector('.ret-income-amount').value || 0),
+            startAge: Number(card.querySelector('.ret-income-startage').value || 0)
+          }))
+        };
+      }
+
+      async function runCase(name, inputs, expectation, body) {
+        try {
+          const actual = await body();
+          record(name, inputs, expectation, actual);
+        } catch (error) {
+          checks.push({ name, inputs, expectation, actual: error.message, passed: false });
+        }
+      }
+
+      try {
+        await runCase(
+          'Personal zero retirement survives saving, reload and person switching',
+          'Age 40; two people each initial 120000, monthly 0; personal returns 0%/8%; withdrawal 4%; no pension.',
+          'At 41, zero portfolio 120000 and withdrawal 400; eight portfolio rounds to 129960; zero remains unchanged after switching back and reloading.',
+          async () => {
+            const settings = retirement({ currentAge: 40, withdrawalGoal: 400, statePensionEnabled: false });
+            let app = await loadPlan(plan('Personal retirement', [
+              { ...person(1, 'Zero', 120000, 0, { ...settings }), returnRate: 0 },
+              { ...person(2, 'Eight', 120000, 0, { ...settings }), returnRate: 8 }
+            ], { perPersonReturn: true, returnRate: 8 }), 'ret_personal');
+            async function checkPerson(name, portfolio, withdrawal) {
+              await selectRetirementPerson(app, name);
+              const row = rowAtAge(app.doc, 41);
+              assert(cellText(row, 2) === portfolio, `${name} portfolio: ${cellText(row, 2)}`);
+              assert(cellText(row, 3) === withdrawal, `${name} withdrawal: ${cellText(row, 3)}`);
+              assert(goalMet(row), `${name} goal status`);
+              await exitAnalysis(app);
+            }
+            await checkPerson('Zero', '€120.000', '€400');
+            await checkPerson('Eight', '€129.960', '€433');
+            await checkPerson('Zero', '€120.000', '€400');
+            app.win.saveCurrentToPlan(true);
+            const saved = JSON.parse(localStorage.getItem('investment_plans')).ret_personal;
+            assertNear(saved.people[0].returnRate, 0, 'saved zero');
+            assertNear(saved.people[1].returnRate, 8, 'saved eight');
+            app = await navigateFrame();
+            await checkPerson('Zero', '€120.000', '€400');
+            await checkPerson('Eight', '€129.960', '€433');
+            for (const value of ['', 'invalid', 'Infinity']) {
+              app.doc.getElementById('returnRate-1').value = value;
+              await checkPerson('Zero', '€129.960', '€433');
+            }
+            app.doc.getElementById('returnRate-1').remove();
+            await checkPerson('Zero', '€129.960', '€433');
+            return 'Zero/eight retirement rows, persistence, selection and invalid/missing fallback passed.';
+          }
+        );
+
+        await runCase(
+          'No-return withdrawal amount without state pension',
+          'Current age 40; initial 120000; monthly 0; return 0%; withdrawal rate 4%; goal 400; state pension disabled.',
+          'At age 41, balance stays 120000 and monthly withdrawal is 120000 × 4% / 12 = 400; goal is met.',
+          async () => {
+            const app = await loadPlan(plan('No pension', [person(1, 'No Pension', 120000, 0, retirement({
+              currentAge: 40, withdrawalGoal: 400, withdrawalRate: 4, statePensionEnabled: false
+            }))]), 'ret_no_pension');
+            setGlobalReturn(app, 0);
+            await selectRetirementPerson(app, 'No Pension');
+            const row = rowAtAge(app.doc, 41);
+            assert(cellText(row, 1) === '€120.000', 'Invested column was not €120,000');
+            assert(cellText(row, 2) === '€120.000', 'Portfolio column was not €120,000');
+            assert(cellText(row, 3) === '€400', 'Monthly withdrawal column was not €400');
+            assert(goalMet(row), 'Goal status was not met at age 41');
+            assert(app.doc.querySelector('.retirement-analytics-card').innerText.toLowerCase().includes('fi reached'), 'FI status was not shown');
+            return { age: 41, invested: cellText(row, 1), balance: cellText(row, 2), withdrawal: cellText(row, 3), goalMet: goalMet(row) };
+          }
+        );
+
+          await runCase(
+            'Extracted base/bull/bear rows match pre-extraction snapshots',
+            'Fixed pension-disabled, pension-enabled, additional-income, one-year inflation, and 8% ±2pp return inputs; start year 2030.',
+            'Selected yearly rows, all returned fields, and FI ages match values captured from the original nested simulate(rate) before extraction.',
+            async () => {
+              const fixtures = [
+                {
+                  name: 'pension disabled',
+                  inputs: { initial: 120000, monthly: 0, increaseRate: 0, useInflation: false, inflationRate: 0, currentAge: 40, statePensionAge: 67, withdrawalGoal: 400, withdrawalRate: 4, noStatePension: true, statePensionIncome: 0, additionalIncomeSources: [], startYear: 2030 },
+                  ages: [41, 42], rates: { base: 0, bull: 0, bear: 0 },
+                  expected: {
+                    base: [[1,41,120000,400,true,120000,2030],[2,42,120000,400,true,120000,2031]],
+                    bull: [[1,41,120000,400,true,120000,2030],[2,42,120000,400,true,120000,2031]],
+                    bear: [[1,41,120000,400,true,120000,2030],[2,42,120000,400,true,120000,2031]],
+                    fiAges: { base: 41, bull: 41, bear: 41 }
+                  }
+                },
+                {
+                  name: 'pension enabled',
+                  inputs: { initial: 90000, monthly: 0, increaseRate: 0, useInflation: false, inflationRate: 0, currentAge: 64, statePensionAge: 66, withdrawalGoal: 1000, withdrawalRate: 4, noStatePension: false, statePensionIncome: 700, additionalIncomeSources: [], startYear: 2030 },
+                  ages: [65, 66, 67], rates: { base: 0, bull: 0, bear: 0 },
+                  expected: {
+                    base: [[1,65,90000,300,false,90000,2030],[2,66,90000,300,true,90000,2031],[3,67,90000,300,true,90000,2032]],
+                    bull: [[1,65,90000,300,false,90000,2030],[2,66,90000,300,true,90000,2031],[3,67,90000,300,true,90000,2032]],
+                    bear: [[1,65,90000,300,false,90000,2030],[2,66,90000,300,true,90000,2031],[3,67,90000,300,true,90000,2032]],
+                    fiAges: { base: 66, bull: 66, bear: 66 }
+                  }
+                },
+                {
+                  name: 'additional income',
+                  inputs: { initial: 60000, monthly: 0, increaseRate: 0, useInflation: false, inflationRate: 0, currentAge: 64, statePensionAge: 67, withdrawalGoal: 500, withdrawalRate: 4, noStatePension: true, statePensionIncome: 0, additionalIncomeSources: [{ label: 'Bridge', amount: 300, startAge: 66 }], startYear: 2030 },
+                  ages: [65, 66, 67], rates: { base: 0, bull: 0, bear: 0 },
+                  expected: {
+                    base: [[1,65,60000,200,false,60000,2030],[2,66,60000,200,true,60000,2031],[3,67,60000,200,true,60000,2032]],
+                    bull: [[1,65,60000,200,false,60000,2030],[2,66,60000,200,true,60000,2031],[3,67,60000,200,true,60000,2032]],
+                    bear: [[1,65,60000,200,false,60000,2030],[2,66,60000,200,true,60000,2031],[3,67,60000,200,true,60000,2032]],
+                    fiAges: { base: 66, bull: 66, bear: 66 }
+                  }
+                },
+                {
+                  name: 'inflation',
+                  inputs: { initial: 120000, monthly: 0, increaseRate: 0, useInflation: true, inflationRate: 0.1, currentAge: 30, statePensionAge: 67, withdrawalGoal: 500, withdrawalRate: 4, noStatePension: true, statePensionIncome: 0, additionalIncomeSources: [], startYear: 2030 },
+                  ages: [31, 32, 33], rates: { base: 0, bull: 0, bear: 0 },
+                  expected: {
+                    base: [[1,31,109090.90909090909,363.6363636363637,false,120000,2030],[2,32,99173.55371900825,330.5785123966942,false,120000,2031],[3,33,90157.7761081893,300.525920360631,false,120000,2032]],
+                    bull: [[1,31,109090.90909090909,363.6363636363637,false,120000,2030],[2,32,99173.55371900825,330.5785123966942,false,120000,2031],[3,33,90157.7761081893,300.525920360631,false,120000,2032]],
+                    bear: [[1,31,109090.90909090909,363.6363636363637,false,120000,2030],[2,32,99173.55371900825,330.5785123966942,false,120000,2031],[3,33,90157.7761081893,300.525920360631,false,120000,2032]],
+                    fiAges: { base: null, bull: null, bear: null }
+                  }
+                },
+                {
+                  name: 'different return rates',
+                  inputs: { initial: 100000, monthly: 0, increaseRate: 0, useInflation: false, inflationRate: 0, currentAge: 30, statePensionAge: 67, withdrawalGoal: 381, withdrawalRate: 4, noStatePension: true, statePensionIncome: 0, additionalIncomeSources: [], startYear: 2030 },
+                  ages: [31, 32, 33], rates: { base: 0.08, bull: 0.10, bear: 0.06 },
+                  expected: {
+                    base: [[1,31,108299.95068075098,360.99983560250325,false,100000,2030],[2,32,117288.79317453093,390.9626439151031,true,100000,2031],[3,33,127023.70516206503,423.4123505402168,true,100000,2032]],
+                    bull: [[1,31,110471.30674412967,368.23768914709893,false,100000,2030],[2,32,122039.09613755593,406.79698712518643,true,100000,2031],[3,33,134818.18424188273,449.39394747294244,true,100000,2032]],
+                    bear: [[1,31,106167.7811864498,353.89260395483274,false,100000,2030],[2,32,112715.97762053888,375.7199254017963,false,100000,2031],[3,33,119668.05248234146,398.8935082744715,true,100000,2032]],
+                    fiAges: { base: 32, bull: 32, bear: 33 }
+                  }
+                }
+              ];
+
+              function snapshot(rows, ages) {
+                return rows.filter(row => ages.includes(row.age)).map(row => [
+                  row.year, row.age, row.balance, row.safeMonthly, row.goalMet, row.invested, row.calendarYear
+                ]);
+              }
+
+              function compareRows(actual, expected, label) {
+                assert(actual.length === expected.length, `${label} row count differs`);
+                actual.forEach((row, rowIndex) => {
+                  assert(row.length === expected[rowIndex].length, `${label} row ${rowIndex} field count differs`);
+                  row.forEach((value, fieldIndex) => {
+                    const expectedValue = expected[rowIndex][fieldIndex];
+                    if (typeof expectedValue === 'number') {
+                      assertNear(value, expectedValue, `${label} row ${rowIndex} field ${fieldIndex}`);
+                    } else {
+                      assert(value === expectedValue, `${label} row ${rowIndex} field ${fieldIndex}: expected ${expectedValue}, got ${value}`);
+                    }
+                  });
+                });
+              }
+
+              function firstGoalAge(rows) { return rows.find(row => row.goalMet)?.age ?? null; }
+
+              const summaries = [];
+              for (const fixture of fixtures) {
+                const rows = {};
+                for (const key of ['base', 'bull', 'bear']) {
+                  rows[key] = calculateRetirementRows(fixture.inputs, fixture.rates[key]);
+                  compareRows(snapshot(rows[key], fixture.ages), fixture.expected[key], `${fixture.name} ${key}`);
+                  assert(firstGoalAge(rows[key]) === fixture.expected.fiAges[key], `${fixture.name} ${key} FI age differs`);
+                }
+                summaries.push({ name: fixture.name, ages: fixture.ages, fiAges: fixture.expected.fiAges });
+              }
+
+              const startYearRows = calculateRetirementRows({
+                initial: 1000, monthly: 0, increaseRate: 0, useInflation: false, inflationRate: 0,
+                currentAge: 30, statePensionAge: 67, withdrawalGoal: 0, withdrawalRate: 4,
+                noStatePension: true, statePensionIncome: 0, additionalIncomeSources: [], startYear: 2050
+              }, 0);
+              assert(startYearRows[0].calendarYear === 2050, 'Explicit startYear input did not control calendarYear');
+              const functionSource = calculateRetirementRows.toString();
+              assert(!/\b(?:window|document)\b/.test(functionSource), 'Calculation function refers to browser UI globals');
+              assert(!/\b(?:window|document)\b/.test(retirementIncomeAtAge.toString()), 'Income helper refers to browser UI globals');
+              return { snapshotsMatched: summaries, startYear: startYearRows[0].calendarYear, domFree: true };
+            }
+          );
+
+        await runCase(
+          'State pension changes goal threshold at its start age',
+          'Current age 64; initial 90000; monthly 0; return 0%; rate 4%; goal 1000; pension 700/month starts age 66.',
+          'Safe portfolio withdrawal is 90000 × 4% / 12 = 300. At age 65 the 1000 goal is unmet; at age 66 pension reduces the required portfolio income to 300, so it is met.',
+          async () => {
+            const app = await loadPlan(plan('Pension threshold', [person(1, 'Pension Person', 90000, 0, retirement({
+              currentAge: 64, withdrawalGoal: 1000, withdrawalRate: 4,
+              statePensionEnabled: true, statePensionAge: 66, statePensionIncome: 700
+            }))]), 'ret_pension_threshold');
+            setGlobalReturn(app, 0);
+            await selectRetirementPerson(app, 'Pension Person');
+            const before = rowAtAge(app.doc, 65);
+            const atStart = rowAtAge(app.doc, 66);
+            assert(cellText(before, 3) === '€300', 'Age 65 withdrawal was not €300');
+            assert(!goalMet(before), 'Goal was unexpectedly met before pension age');
+            assert(cellText(atStart, 3).includes('€300') && cellText(atStart, 3).includes('€700') && cellText(atStart, 3).includes('€1.000'), 'Age 66 row did not show portfolio 300 + pension 700 = 1000');
+            assert(goalMet(atStart), 'Goal was not met at pension age');
+            return { age65: { income: cellText(before, 3), goalMet: goalMet(before) }, age66: { income: cellText(atStart, 3), goalMet: goalMet(atStart) } };
+          }
+        );
+
+        await runCase(
+          'Additional income starts at its configured age',
+          'Current age 64; initial 60000; monthly 0; return 0%; rate 4%; goal 500; state pension off; Bridge income 300/month starts age 66.',
+          'Portfolio withdrawal remains 60000 × 4% / 12 = 200. At age 65 the goal is unmet; at age 66 the 300 bridge source reduces required portfolio income to 200 and the goal is met.',
+          async () => {
+            const app = await loadPlan(plan('Bridge threshold', [person(1, 'Bridge Person', 60000, 0, retirement({
+              currentAge: 64, withdrawalGoal: 500, withdrawalRate: 4, statePensionEnabled: false,
+              additionalIncomeSources: [{ label: 'Bridge', amount: 300, startAge: 66 }]
+            }))]), 'ret_bridge_threshold');
+            setGlobalReturn(app, 0);
+            await selectRetirementPerson(app, 'Bridge Person');
+            const before = rowAtAge(app.doc, 65);
+            const atStart = rowAtAge(app.doc, 66);
+            assert(cellText(before, 3) === '€200', 'Age 65 row should show only €200 from the portfolio');
+            assert(!cellText(before, 3).includes('Bridge'), 'Bridge income appeared before its start age');
+            assert(!goalMet(before), 'Goal was unexpectedly met before bridge income begins');
+            assert(cellText(atStart, 3).includes('Bridge') && cellText(atStart, 3).includes('€300') && cellText(atStart, 3).includes('€500'), 'Age 66 row did not show Bridge income and €500 total');
+            assert(goalMet(atStart), 'Goal was not met once Bridge income began');
+            return { age65: { income: cellText(before, 3), goalMet: goalMet(before) }, age66: { income: cellText(atStart, 3), goalMet: goalMet(atStart) } };
+          }
+        );
+
+        await runCase(
+          'One-year inflation-adjusted retirement row',
+          'Current age 30; initial 120000; monthly 0; return 0%; withdrawal rate 4%; inflation 10%; state pension off.',
+          'At age 31, today-value balance is 120000 / 1.10 = 109090.909..., monthly withdrawal is that amount × 4% / 12 = 363.636...; displayed rounded values are €109,091 and €364.',
+          async () => {
+            const app = await loadPlan(plan('Retirement inflation', [person(1, 'Inflation Person', 120000, 0, retirement({
+              currentAge: 30, withdrawalGoal: 500, withdrawalRate: 4, statePensionEnabled: false
+            }))], { useInflation: true, inflationRate: 10 }), 'ret_inflation');
+            setGlobalReturn(app, 0);
+            await selectRetirementPerson(app, 'Inflation Person');
+            const row = rowAtAge(app.doc, 31);
+            assert(cellText(row, 1) === '€120.000', 'Invested amount should remain nominal at €120,000');
+            assert(cellText(row, 2) === '€109.091', 'Inflation-adjusted balance was not €109,091');
+            assert(cellText(row, 3) === '€364', 'Inflation-adjusted monthly withdrawal was not €364');
+            return { age: 31, invested: cellText(row, 1), balance: cellText(row, 2), withdrawal: cellText(row, 3) };
+          }
+        );
+
+        await runCase(
+          'Bull/base/bear retirement FI ages',
+          'Current age 30; initial 100000; monthly 0; rate 4%; goal 381/month; state pension off; base return 8%; scenario range ±2 percentage points.',
+          'Year-one monthly withdrawals: bull 368.24, base 361.00, bear 353.89. Goal 381 is first met at age 32 for bull/base and age 33 for bear; therefore bull age ≤ base age ≤ bear age.',
+          async () => {
+            const app = await loadPlan(plan('Retirement scenarios', [person(1, 'Scenario Person', 100000, 0, retirement({
+              currentAge: 30, withdrawalGoal: 381, withdrawalRate: 4, statePensionEnabled: false
+            }))], { returnRate: 8, scenarioRange: 2 }), 'ret_scenarios');
+            await selectRetirementPerson(app, 'Scenario Person');
+            app.win.toggleShowScenarios();
+            await waitFor(() => app.win.eval('showScenarios === true') && app.doc.querySelector('.retirement-analytics-card'), 'retirement scenario recalculation');
+            await new Promise(resolve => setTimeout(resolve, 100));
+            const text = app.doc.querySelector('.retirement-analytics-card').innerText;
+            const ageFor = label => {
+              const match = text.match(new RegExp(`${label}\\s+Age (\\d+)`));
+              if (!match) throw new Error(`Missing ${label} FI age in retirement scenario summary`);
+              return Number(match[1]);
+            };
+            const bull = ageFor('Bull');
+            const base = ageFor('Base');
+            const bear = ageFor('Bear');
+            assert(bull === 32 && base === 32 && bear === 33, `Expected scenario FI ages 32/32/33, got ${bull}/${base}/${bear}`);
+            return { bull, base, bear };
+          }
+        );
+
+        await runCase(
+          'Per-person assumptions survive switching and reload',
+          'Two people: One age 41/goal 2000/rate 3.5/no pension/Part-time 200 from 60; Two age 52/goal 4000/rate 5/pension age 70 and 800/Other 350 from 62.',
+          'Switching analysis targets shows each person’s own retirement fields and source; after exiting and reloading the plan, selecting each person restores the same values.',
+          async () => {
+            const first = retirement({
+              currentAge: 41, withdrawalGoal: 2000, withdrawalRate: 3.5,
+              statePensionEnabled: false, statePensionAge: 67, statePensionIncome: 0,
+              additionalIncomeSources: [{ label: 'Part-time', amount: 200, startAge: 60 }]
+            });
+            const second = retirement({
+              currentAge: 52, withdrawalGoal: 4000, withdrawalRate: 5,
+              statePensionEnabled: true, statePensionAge: 70, statePensionIncome: 800,
+              additionalIncomeSources: [{ label: 'Other', amount: 350, startAge: 62 }]
+            });
+            let app = await loadPlan(plan('Per-person settings', [
+              person(1, 'Person One', 10000, 500, first),
+              person(2, 'Person Two', 20000, 700, second)
+            ]), 'ret_per_person');
+
+            async function selectAndRead(name) {
+              await selectRetirementPerson(app, name);
+              return readRetirementInputs(app.doc);
+            }
+
+            function assertSettings(actual, expected, label) {
+              assertNear(actual.currentAge, expected.currentAge, `${label} current age`);
+              assertNear(actual.withdrawalGoal, expected.withdrawalGoal, `${label} withdrawal goal`);
+              assertNear(actual.withdrawalRate, expected.withdrawalRate, `${label} withdrawal rate`);
+              assert(actual.statePensionEnabled === expected.statePensionEnabled, `${label} state-pension enabled state`);
+              assertNear(actual.statePensionAge, expected.statePensionAge, `${label} pension age`);
+              assertNear(actual.statePensionIncome, expected.statePensionIncome, `${label} pension income`);
+              assert(JSON.stringify(actual.additionalIncomeSources) === JSON.stringify(expected.additionalIncomeSources), `${label} additional income source`);
+            }
+
+            let one = await selectAndRead('Person One');
+            assertSettings(one, first, 'Person One');
+            await exitAnalysis(app);
+            let two = await selectAndRead('Person Two');
+            assertSettings(two, second, 'Person Two');
+            await exitAnalysis(app);
+
+            app = await navigateFrame();
+            one = await selectAndRead('Person One');
+            assertSettings(one, first, 'Person One after reload');
+            await exitAnalysis(app);
+            two = await selectAndRead('Person Two');
+            assertSettings(two, second, 'Person Two after reload');
+            return { personOne: one, personTwo: two, afterReload: true };
+          }
+        );
+      } finally {
+        frame.remove();
+        if (previousPlans === null) localStorage.removeItem('investment_plans');
+        else localStorage.setItem('investment_plans', previousPlans);
+        if (previousActiveId === null) localStorage.removeItem('investment_activePlanId');
+        else localStorage.setItem('investment_activePlanId', previousActiveId);
+      }
+
+      const failures = checks.filter(check => !check.passed);
+      status.className = failures.length ? 'fail' : 'pass';
+      status.textContent = `${failures.length ? 'FAILED' : 'PASS'} (${checks.length - failures.length}/${checks.length})\n\n`
+        + checks.map(check => `${check.passed ? 'PASS' : 'FAIL'} ${check.name}\nInputs: ${check.inputs}\nExpected: ${check.expectation}\nActual: ${typeof check.actual === 'string' ? check.actual : JSON.stringify(check.actual)}`).join('\n\n');
+    })().catch(error => {
+      const status = document.getElementById('status');
+      status.className = 'fail';
+      status.textContent = `TEST RUNNER ERROR: ${error.stack || error.message}`;
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Milestone profit donut checks</title>
+  <style>
+    body { max-width: 900px; margin: 32px auto; padding: 0 20px; font: 14px/1.5 system-ui, sans-serif; color: #1f2937; }
+    h1 { font-size: 22px; }
+    #status { padding: 12px; background: #f3f4f6; border-radius: 6px; white-space: pre-wrap; }
+    #status.pass { background: #ecfdf5; color: #065f46; }
+    #status.fail { background: #fef2f2; color: #991b1b; }
+    iframe { position: fixed; left: 0; top: 0; width: 1280px; height: 900px; border: 0; }
+  </style>
+</head>
+<body>
+  <h1>Milestone profit donut lifecycle</h1>
+  <p>This standalone suite loads the real planner in an iframe and asserts numeric results. From PowerShell at the workspace root, run <code>Get-Content .\js\serveAppCalculationTests.ps1 -Raw | Invoke-Expression</code>, then open <code>http://127.0.0.1:8765/js/profitDonut.test.html</code>. Press Ctrl+C to stop the server. It refuses to run from <code>file://</code> so the planner's normal file-page storage is not touched.</p>
+  <div id="status">Starting checks...</div>
+  <iframe id="planner" title="Isolated planner under test"></iframe>
+  <script>
+    (async function() {
+      const status = document.getElementById('status');
+      const frame = document.getElementById('planner');
+      const tolerance = 1e-6;
+      const checks = [];
+
+      if (location.protocol !== 'http:' || !['localhost', '127.0.0.1'].includes(location.hostname)) {
+        status.className = 'fail';
+        status.textContent = 'NOT RUN: open this page from a localhost web server to keep test storage separate from the normal file:// planner.';
+        return;
+      }
+
+      const previousPlans = localStorage.getItem('investment_plans');
+      const previousActiveId = localStorage.getItem('investment_activePlanId');
+      const retirement = {
+        currentAge: 30,
+        withdrawalGoal: 5000,
+        withdrawalRate: 4,
+        statePensionEnabled: true,
+        statePensionAge: 67,
+        statePensionIncome: 0,
+        additionalIncomeSources: []
+      };
+
+      function person(id, name, initial, monthly, increaseRate = 0) {
+        return {
+          id, name, initial, monthly, increaseRate, startOffset: 1, stopOffset: 0,
+          returnRate: null,
+          retirementSettings: { ...retirement }
+        };
+      }
+
+      function plan(name, people, options = {}) {
+        return {
+          name,
+          people,
+          settings: {
+            years: 1,
+            increaseRate: 2,
+            returnRate: 8,
+            perPersonReturn: false,
+            useInflation: false,
+            inflationRate: 2.5,
+            scenarioRange: 2,
+            currentAge: 30,
+            retirementAge: 67,
+            noStatePension: false,
+            withdrawalGoal: 5000,
+            withdrawalRate: 4,
+            statePensionIncome: 0,
+            householdMembers: [],
+            currency: '€',
+            startYear: 0,
+            ...options
+          }
+        };
+      }
+
+      function assertNear(actual, expected, description) {
+        if (!Number.isFinite(actual) || Math.abs(actual - expected) > tolerance) {
+          throw new Error(`${description}: expected ${expected}, got ${actual} (tolerance ${tolerance})`);
+        }
+      }
+
+      function record(name, inputs, expectation, actual) {
+        checks.push({ name, inputs, expectation, actual, passed: true });
+      }
+
+      async function waitFor(predicate, description, timeout = 12000) {
+        const deadline = Date.now() + timeout;
+        while (Date.now() < deadline) {
+          if (predicate()) return;
+          await new Promise(resolve => setTimeout(resolve, 40));
+        }
+        throw new Error(`Timed out waiting for ${description}`);
+      }
+
+      async function loadPlan(testPlan, id) {
+        localStorage.setItem('investment_plans', JSON.stringify({ [id]: testPlan }));
+        localStorage.setItem('investment_activePlanId', id);
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('Planner page load timed out')), 20000);
+          frame.onload = () => { clearTimeout(timer); resolve(); };
+          frame.onerror = () => { clearTimeout(timer); reject(new Error('Planner page failed to load')); };
+          frame.src = `../index.html?calculationTest=${Date.now()}`;
+        });
+        const win = frame.contentWindow;
+        const doc = win.document;
+        await waitFor(() => win.Chart && win.Chart.getChart(doc.getElementById('investmentChart')), 'main investment chart');
+        return { win, doc, chart: win.Chart.getChart(doc.getElementById('investmentChart')) };
+      }
+
+      async function reloadAppFromExistingStorage() {
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('Planner reload timed out')), 20000);
+          frame.onload = () => { clearTimeout(timer); resolve(); };
+          frame.onerror = () => { clearTimeout(timer); reject(new Error('Planner reload failed')); };
+          frame.src = `../index.html?calculationTest=${Date.now()}`;
+        });
+        const win = frame.contentWindow;
+        const doc = win.document;
+        await waitFor(() => win.Chart && win.Chart.getChart(doc.getElementById('investmentChart')), 'reloaded main investment chart');
+        return { win, doc, chart: win.Chart.getChart(doc.getElementById('investmentChart')) };
+      }
+
+      function setInput(win, doc, id, value) {
+        const input = doc.getElementById(id);
+        if (!input) throw new Error(`Missing input #${id}`);
+        input.value = String(value);
+        input.dispatchEvent(new win.Event('input', { bubbles: true }));
+      }
+
+      function personBalance(win, id) {
+        return win.eval(`personFinalBalances[${id}]`);
+      }
+
+      function dataset(chart, label) {
+        const result = chart.data.datasets.find(item => item.label === label);
+        if (!result) throw new Error(`Missing chart dataset "${label}"`);
+        return result;
+      }
+
+      function resultCardValue(doc, label) {
+        const card = [...doc.querySelectorAll('#combinedResults .card')]
+          .find(item => item.querySelector('h3')?.textContent.trim().startsWith(label));
+        if (!card) throw new Error(`Missing summary card "${label}"`);
+        return card.querySelector('p')?.textContent.trim() || '';
+      }
+
+      async function runCase(name, inputs, expectation, body) {
+        try {
+          const actual = await body();
+          record(name, inputs, expectation, actual);
+        } catch (error) {
+          checks.push({ name, inputs, expectation, actual: error.message, passed: false });
+        }
+      }
+
+      const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+      async function openDonutFixture() {
+        const app = await loadPlan(plan('Donut lifecycle', [person(1, 'Donut Person', 1000, 0)], {
+          years: 1, returnRate: 8, scenarioRange: 0
+        }), 'donut_lifecycle');
+        app.errors = [];
+        app.trace = [];
+        const started = app.win.performance.now();
+        app.mark = (action, extra = {}) => app.trace.push({ ms: Math.round(app.win.performance.now() - started), action, ...extra });
+        app.win.addEventListener('error', event => {
+          app.errors.push({ message: event.message, stack: event.error?.stack || '', ms: Math.round(app.win.performance.now() - started) });
+        });
+        const Chart = app.win.Chart;
+        app.win.Chart = new Proxy(Chart, {
+          construct(target, args) {
+            if (args[0]?.id === 'profitDonutCanvas') app.mark('construct donut', { data: args[1].data.datasets[0].data });
+            try { return Reflect.construct(target, args); }
+            catch (error) {
+              app.errors.push({ message: error.message, stack: error.stack });
+              app.mark('constructor exception', { stack: error.stack }); throw error;
+            }
+          }
+        });
+        const timeout = app.win.setTimeout;
+        app.win.setTimeout = function(callback, delay, ...args) {
+          if (delay !== 460) return timeout.call(app.win, callback, delay, ...args);
+          const canvas = app.doc.getElementById('profitDonutCanvas');
+          app.mark('schedule donut', { delay });
+          return timeout.call(app.win, () => {
+            app.mark('fire donut', { originalCanvasConnected: canvas?.isConnected,
+              sameCanvas: canvas === app.doc.getElementById('profitDonutCanvas') });
+            callback(...args);
+          }, delay);
+        };
+        return app;
+      }
+      function assertLatest(app, initial) {
+        const canvas = app.doc.getElementById('profitDonutCanvas');
+        const chart = app.win.Chart.getChart(canvas);
+        if (!chart) throw new Error('No chart for current canvas');
+        if (chart !== app.win.eval('profitDonutChart')) throw new Error('Stored chart differs from canvas owner');
+        const donuts = Object.values(app.win.Chart.instances).filter(c => c.config.type === 'doughnut');
+        if (donuts.length !== 1) throw new Error(`Expected one live donut, got ${donuts.length}`);
+        assertNear(chart.data.datasets[0].data[0], initial, 'latest invested');
+        assertNear(chart.data.datasets[0].data[1], initial * (Math.pow(1 + .08/12, 12) - 1), 'latest profit');
+        return chart;
+      }
+      function assertNoErrors(app) {
+        if (app.errors.length) throw new Error(JSON.stringify({ errors: app.errors, trace: app.trace }));
+      }
+      try {
+        await runCase('Rapid input changes while creation is pending',
+          'Open profit analysis; initial 1000 -> 2000 -> 3000 in the same task, before the 460ms creation timers fire.',
+          'No exceptions, exactly one current donut, latest invested=3000 and profit=3000*((1+.08/12)^12-1).', async () => {
+            const app = await openDonutFixture();
+            app.mark('open profit');
+            app.win.highlightTarget(1);
+            for (const amount of [2000, 3000]) {
+              app.mark('input initial', { amount });
+              setInput(app.win, app.doc, 'initial-1', amount);
+            }
+            await sleep(900);
+            assertNoErrors(app);
+            try { assertLatest(app, 3000); }
+            catch (error) { throw new Error(JSON.stringify({ message: error.message, trace: app.trace })); }
+            return { trace: app.trace, errors: app.errors };
+          });
+
+        await runCase('Switch views while creation is pending, then leave an existing donut',
+          'Profit -> milestones -> profit before 460ms; then leave a live chart and leave another pending render.',
+          'Only the latest profit view creates a chart; leaving releases the stored reference and chart registry entry.', async () => {
+            const app = await openDonutFixture();
+            app.win.highlightTarget(1);
+            app.win.setAnalysisTab('milestones');
+            setInput(app.win, app.doc, 'initial-1', 4000);
+            app.win.setAnalysisTab('profit');
+            await sleep(900);
+            const chart = assertLatest(app, 4000);
+            app.win.setAnalysisTab('milestones');
+            if (app.win.eval('profitDonutChart') !== null || app.win.Chart.instances[chart.id]) {
+              throw new Error('Leaving profit retained its chart');
+            }
+            app.win.setAnalysisTab('profit');
+            app.win.exitAnalysisMode();
+            await sleep(900);
+            if (app.win.eval('profitDonutChart') !== null
+                || Object.values(app.win.Chart.instances).some(c => c.config.type === 'doughnut')) {
+              throw new Error('Pending creation survived analysis exit');
+            }
+            assertNoErrors(app);
+            return { trace: app.trace, errors: app.errors, releasedOnExit: true };
+          });
+
+        await runCase('Ordinary open, donut hover, pointer leave, KPI hover and recalculation',
+          'Open 1000 at 8%; hover profit arc and leave; hover invested KPI and leave; recalculate at 5000.',
+          'Appearance/animation settings and interactions remain; old chart is destroyed and latest donut/KPIs show 5000 and its profit.', async () => {
+            const app = await openDonutFixture();
+            app.win.highlightTarget(1);
+            await sleep(2000);
+            const chart = assertLatest(app, 1000);
+            const doc = app.doc, win = app.win;
+            const label = () => doc.getElementById('profitDonutCenterLbl').textContent;
+            const euro = value => '€' + new Intl.NumberFormat('nl-NL').format(Math.round(value));
+            await waitFor(() => doc.getElementById('pkv0').textContent === euro(1000), 'ordinary count-up');
+            if (chart.options.cutout !== '70%' || chart.options.animation.duration !== 1200
+                || chart.options.animation.easing !== 'easeOutCubic'
+                || chart.data.datasets[0].hoverOffset !== 20) throw new Error('Donut appearance settings changed');
+            const canvas = chart.canvas;
+            const point = chart.getDatasetMeta(0).data[1].getCenterPoint();
+            const rect = canvas.getBoundingClientRect();
+            canvas.dispatchEvent(new win.MouseEvent('mousemove', {
+              bubbles: true, clientX: rect.left + point.x, clientY: rect.top + point.y
+            }));
+            await waitFor(() => label() === 'PROFIT', 'profit arc hover');
+            if (doc.querySelector('.profit-kpi-card[data-sidx="0"]').style.opacity !== '0.28') {
+              throw new Error('Donut hover did not dim opposite KPI');
+            }
+            // Leave the arc into its empty center before leaving the canvas.
+            // The center is inside Chart.js's hit-test area and has no segment.
+            const arc = chart.getDatasetMeta(0).data[1];
+            canvas.dispatchEvent(new win.MouseEvent('mousemove', {
+              bubbles: true, clientX: rect.left + arc.x, clientY: rect.top + arc.y
+            }));
+            await waitFor(() => label() === 'CURRENT PORTFOLIO', 'arc leave reset');
+            canvas.dispatchEvent(new win.PointerEvent('pointerleave'));
+            canvas.dispatchEvent(new win.MouseEvent('mouseout', { bubbles: true }));
+            await waitFor(() => label() === 'CURRENT PORTFOLIO', 'pointer leave reset');
+            const kpi = doc.querySelector('.profit-kpi-card[data-sidx="0"]');
+            kpi.dispatchEvent(new win.MouseEvent('mouseenter'));
+            if (label() !== 'INVESTED CAPITAL' || chart.getActiveElements()[0]?.index !== 0) {
+              throw new Error('KPI hover did not activate invested segment');
+            }
+            kpi.dispatchEvent(new win.MouseEvent('mouseleave'));
+            if (label() !== 'CURRENT PORTFOLIO' || chart.getActiveElements().length !== 0) {
+              throw new Error('KPI leave did not reset donut');
+            }
+            // Leave a delayed hover reset pending while replacing its render.
+            chart.options.onHover({}, [{ index: 1 }]);
+            await waitFor(() => label() === 'PROFIT', 'hover before recalculation');
+            chart.options.onHover({}, []);
+            setInput(win, doc, 'initial-1', 5000);
+            if (win.Chart.instances[chart.id]) throw new Error('Recalculation retained old chart');
+            await sleep(2000);
+            const latest = assertLatest(app, 5000);
+            await waitFor(() => doc.getElementById('pkv0').textContent === euro(5000), 'latest invested KPI');
+            const profit = 5000 * (Math.pow(1 + .08/12, 12) - 1);
+            if (doc.getElementById('pkv1').textContent !== '+' + euro(profit)
+                || doc.getElementById('profitDonutCenterVal').textContent !== euro(5000 + profit)) {
+              throw new Error('Latest KPI or center values are stale');
+            }
+            assertNoErrors(app);
+            return { chartData: latest.data.datasets[0].data, errors: app.errors,
+              hover: true, pointerLeave: true, kpiHover: true, recalculation: true };
+          });
+      } finally {
+        frame.remove();
+        if (previousPlans === null) localStorage.removeItem('investment_plans');
+        else localStorage.setItem('investment_plans', previousPlans);
+        if (previousActiveId === null) localStorage.removeItem('investment_activePlanId');
+        else localStorage.setItem('investment_activePlanId', previousActiveId);
+      }
+      const failures = checks.filter(check => !check.passed);
+      status.className = failures.length ? 'fail' : 'pass';
+      status.textContent = `${failures.length ? 'FAILED' : 'PASS'} (${checks.length - failures.length}/${checks.length})\n\n`
+        + checks.map(check => `${check.passed ? 'PASS' : 'FAIL'} ${check.name}\nInputs: ${check.inputs}\nExpected: ${check.expectation}\nActual: ${JSON.stringify(check.actual)}`).join('\n\n');
+    })().catch(error => { document.getElementById('status').textContent = `TEST RUNNER ERROR: ${error.stack}`; });
+  </script>
+</body>
+</html>
