@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Milestone UI characterization</title>
+  <style>
+    body { max-width: 1000px; margin: 32px auto; padding: 0 20px; font: 14px/1.5 system-ui, sans-serif; color: #1f2937; }
+    h1 { font-size: 22px; }
+    #status { padding: 12px; background: #f3f4f6; border-radius: 6px; white-space: pre-wrap; }
+    #status.pass { background: #ecfdf5; color: #065f46; }
+    #status.fail { background: #fef2f2; color: #991b1b; }
+    iframe { position: fixed; left: 0; top: 0; width: 1280px; height: 900px; border: 0; }
+  </style>
+</head>
+<body>
+  <h1>Milestone UI characterization</h1>
+  <p>Serve the project with <code>Get-Content .\scripts\serveAppCalculationTests.ps1 -Raw | Invoke-Expression</code> and open <code>http://127.0.0.1:8765/tests/milestoneUI.test.html</code> in a fresh browser profile or private session. Run suites one at a time. This page uses the real planner and normal animation timing, restores its previous plan/theme keys afterward, and refuses <code>file://</code>. Known lifecycle failures remain failing assertions; see <code>docs/history/milestone-characterization.md</code>.</p>
+  <div id="status">Starting checks...</div>
+  <iframe id="planner" title="Isolated planner under test"></iframe>
+  <script>
+    (async function() {
+      const status = document.getElementById('status');
+      const frame = document.getElementById('planner');
+      if (location.protocol !== 'http:' || !['localhost', '127.0.0.1'].includes(location.hostname)) {
+        status.className = 'fail';
+        status.textContent = 'NOT RUN: use a localhost server and isolated browser storage.';
+        return;
+      }
+
+      const keys = ['investment_plans', 'investment_activePlanId', 'investment_darkMode'];
+      const previous = keys.map(key => localStorage.getItem(key));
+      const checks = [];
+      const browserErrors = [];
+      const thresholds = [100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000, 250000, 500000, 1000000, 2000000, 5000000];
+      const placeholder = 'Hover or click a milestone to see details';
+      const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+      let app;
+
+      function person(id, name, initial, monthly) {
+        return { id, name, initial, monthly, increaseRate: 0, startOffset: 1, stopOffset: 0,
+          returnRate: null, retirementSettings: { currentAge: 30, withdrawalGoal: 5000,
+            withdrawalRate: 4, statePensionEnabled: false, statePensionAge: 67,
+            statePensionIncome: 0, additionalIncomeSources: [] } };
+      }
+
+      function fixture(people = [person(1, 'First', 100, 25), person(2, 'Second', 200, 50)], options = {}) {
+        return { name: 'Milestone characterization', people, settings: {
+          years: 2, returnRate: 0, increaseRate: 0, perPersonReturn: false,
+          useInflation: false, inflationRate: 10, scenarioRange: 0,
+          currentAge: 30, retirementAge: 67, noStatePension: true,
+          withdrawalGoal: 5000, withdrawalRate: 4, statePensionIncome: 0,
+          householdMembers: people.map(p => p.id), currency: '\u20ac', startYear: 0, ...options
+        } };
+      }
+
+      function assert(condition, message) {
+        if (!condition) {
+          const error = new Error(message);
+          error.name = 'AssertionError';
+          throw error;
+        }
+      }
+      function equal(actual, expected, label) {
+        assert(JSON.stringify(actual) === JSON.stringify(expected), `${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+      }
+      function near(actual, expected, label, tolerance = 1e-6) {
+        assert(Number.isFinite(actual) && Math.abs(actual - expected) <= tolerance, `${label}: expected ${expected}, got ${actual}`);
+      }
+      function text(el) { return el?.textContent.replace(/\s+/g, ' ').trim() || ''; }
+      function required(selector) {
+        const el = app.doc.querySelector(selector);
+        assert(el, `Missing ${selector}`);
+        return el;
+      }
+      const node = (m, row = 0) => required(`.milestone-node[data-mval="${m}"][data-ridx="${row}"]`);
+      const tracker = m => required(`[data-ms-row="${m}"]`);
+      const panel = () => required('#msDetailsPanel');
+      function event(el, type) { el.dispatchEvent(new app.win.MouseEvent(type, { bubbles: type === 'mouseover' })); }
+      function input(id, value) {
+        const el = required('#' + id);
+        el.value = String(value);
+        el.dispatchEvent(new app.win.Event('input', { bubbles: true }));
+      }
+      function state() {
+        // Read shared lexical state; no controller code or definitions are injected.
+        return app.win.eval('({active: milestoneActiveYear, overlay: milestoneOverlayData, target: highlightedTarget, tab: analysisTab})');
+      }
+      function snapshot() {
+        const p = app.doc.getElementById('msDetailsPanel');
+        return { panel: text(p), hasContent: p?.dataset.hasContent || null,
+          opacity: p ? app.win.getComputedStyle(p).opacity : null,
+          progress: ['msProgressBar', 'msTrackerBar'].map(id => app.doc.getElementById(id)?.style.width || null),
+          selected: [...app.doc.querySelectorAll('.ms-selected')].map(el => ({
+            milestone: el.dataset.msRow || el.dataset.mval, row: el.dataset.ridx || null, year: el.dataset.year || null })),
+          state: state(), rows: app.win._milestoneRows?.map(row => ({name: row.name, balances: [...row.balances]})) };
+      }
+      function mark(action, extra = {}) { app.trace.push({ms: Math.round(app.win.performance.now() - app.started), action, ...extra}); }
+
+      // Observe the real canvas calls, rather than accepting a plugin visibility guard
+      // or shared active-year value as proof of a drawn highlight.
+      function observeChart(chart) {
+        const ctx = chart.ctx;
+        const strokes = [];
+        let path = [];
+        const original = {};
+        for (const method of ['beginPath', 'moveTo', 'lineTo', 'stroke']) original[method] = ctx[method];
+        ctx.beginPath = function(...args) { path = []; return original.beginPath.apply(this, args); };
+        ctx.moveTo = function(x, y) { path.push(['M', x, y]); return original.moveTo.call(this, x, y); };
+        ctx.lineTo = function(x, y) { path.push(['L', x, y]); return original.lineTo.call(this, x, y); };
+        ctx.stroke = function(...args) {
+          strokes.push({ path: path.map(p => [...p]), width: this.lineWidth,
+            color: String(this.strokeStyle).replace(/\s/g, ''), dash: this.getLineDash() });
+          return original.stroke.apply(this, args);
+        };
+        return { strokes, restore() { for (const method of Object.keys(original)) ctx[method] = original[method]; } };
+      }
+
+      function highlight(year) {
+        equal(state().active, year, 'Active chart year');
+        const chart = app.chart;
+        app.drawing.strokes.length = 0;
+        chart.update('none');
+        const color = app.doc.body.classList.contains('dark-mode') ? 'rgba(255,255,255,0.28)' : 'rgba(37,99,235,0.32)';
+        const activeLines = app.drawing.strokes.filter(s => s.width === 2 && s.color === color && s.dash.length === 0
+          && s.path.length === 2 && s.path[0][0] === 'M' && s.path[1][0] === 'L'
+          && s.path[0][2] === chart.scales.y.top && s.path[1][2] === chart.scales.y.bottom);
+        if (year === null) equal(activeLines.length, 0, 'No active highlight drawn');
+        else {
+          assert(activeLines.length > 0, 'Active highlight was not drawn');
+          near(activeLines[0].path[0][1], chart.scales.x.getPixelForValue(year - 1), 'Highlight x position');
+        }
+      }
+
+      function progress(expected) {
+        for (const id of ['msProgressBar', 'msTrackerBar']) {
+          const el = required('#' + id);
+          near(parseFloat(el.style.width), expected, id + ' inline percentage', .051);
+          const visiblePct = el.getBoundingClientRect().width / el.parentElement.getBoundingClientRect().width * 100;
+          near(visiblePct, expected, id + ' settled visible percentage', .15);
+        }
+      }
+      function visiblePanel() {
+        assert(panel().getBoundingClientRect().height > 0, 'Panel has no visible layout');
+        near(+app.win.getComputedStyle(panel()).opacity, 1, 'Settled panel opacity');
+      }
+      function projectedDetails(name, label, yearLabel, balance) {
+        const value = text(panel());
+        for (const expected of [name, `${label} Milestone`, `Year Projected ${yearLabel}`, `Portfolio Value ${balance}`]) {
+          assert(value.includes(expected), `Missing detail ${expected}: ${value}`);
+        }
+        equal(panel().dataset.hasContent, '1', 'Details content flag');
+        visiblePanel();
+      }
+      function selected(m, timeline = true) {
+        equal([...app.doc.querySelectorAll('[data-ms-row].ms-selected')].map(el => +el.dataset.msRow), [m], 'Selected tracker');
+        equal([...app.doc.querySelectorAll('.milestone-node.ms-selected')].map(el => +el.dataset.mval), timeline ? [m] : [], 'Selected timeline');
+      }
+
+      async function waitFor(predicate, description, timeout = 20000) {
+        const deadline = Date.now() + timeout;
+        while (Date.now() < deadline) {
+          if (predicate()) return;
+          await sleep(40);
+        }
+        throw new Error('Timed out waiting for ' + description);
+      }
+      async function load(testPlan = fixture(), target = 1, dark = false, settle = true) {
+        if (app) app.drawing.restore();
+        localStorage.setItem('investment_plans', JSON.stringify({ milestone_ui: testPlan }));
+        localStorage.setItem('investment_activePlanId', 'milestone_ui');
+        localStorage.setItem('investment_darkMode', dark ? '1' : '0');
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('Planner load timed out')), 20000);
+          frame.onload = () => { clearTimeout(timer); resolve(); };
+          frame.onerror = () => { clearTimeout(timer); reject(new Error('Planner failed to load')); };
+          frame.src = '../index.html?milestoneTest=' + Date.now();
+        });
+        const win = frame.contentWindow;
+        const doc = win.document;
+        await waitFor(() => win.Chart && win.Chart.getChart(doc.getElementById('investmentChart')), 'main chart');
+        const chart = win.Chart.getChart(doc.getElementById('investmentChart'));
+        app = { win, doc, chart, drawing: observeChart(chart), trace: [], started: win.performance.now() };
+        win.addEventListener('error', e => browserErrors.push(e.message));
+        win.addEventListener('unhandledrejection', e => browserErrors.push(String(e.reason)));
+        mark('open target ' + target);
+        win.highlightTarget(target);
+        win.setAnalysisTab('milestones');
+        if (settle) await sleep(1500);
+        return app;
+      }
+
+      async function runCase(name, inputs, expectation, body) {
+        status.textContent = `Running ${checks.length + 1}: ${name}`;
+        try {
+          await body();
+          checks.push({name, inputs, expectation, passed: true, actual: snapshot(), trace: app.trace});
+        } catch (error) {
+          checks.push({name, inputs, expectation, passed: false, error: error.message,
+            failureType: error.name === 'AssertionError' ? 'assertion' : 'runner',
+            actual: app ? snapshot() : null, trace: app?.trace || []});
+        }
+      }
+
+      try {
+        await runCase('Individual achieved, projected and unreachable rendering', 'initial 100, monthly 25, 2 years, 0%',
+          '100 achieved; 250 at year 1; 500 at year 2; 1000 unreachable; 40% progress', async () => {
+            await load();
+            equal(app.win._msMilestoneData.map(d => d.milestone), thresholds, 'Full threshold list');
+            equal(app.win._msMilestoneData.slice(0, 4).map(d => [d.milestone, d.isCompleted, d.projectedYear]),
+              [[100,true,null], [250,false,1], [500,false,2], [1000,false,null]], 'Milestone statuses');
+            equal([...app.doc.querySelectorAll('[data-ms-row]')].map(el => +el.dataset.msRow), [100,250,500,1000], 'Tracker thresholds');
+            assert(text(tracker(100)).includes('achieved'), 'Achieved tracker label missing');
+            equal(node(250).dataset.year, '1', '250 node year'); equal(node(500).dataset.year, '2', '500 node year');
+            assert(!app.doc.querySelector('.milestone-node[data-mval="100"]'), 'Achieved milestone appears on future timeline');
+            assert(!app.doc.querySelector('.milestone-node[data-mval="1000"]'), 'Unreachable milestone has a projected node');
+            equal(state().overlay, [{year:1,label:'€250'}, {year:2,label:'€500'}], 'Chart milestone markers');
+            equal(app.win._milestoneRows.map(r => r.name), ['First'], 'Individual rows');
+            progress(40); highlight(null); visiblePanel();
+            tracker(100).click(); await sleep(550);
+            assert(text(panel()).includes('Already Achieved') && text(panel()).includes('Current Portfolio €100'), 'Achieved detail values');
+            selected(100, false); highlight(null);
+            tracker(1000).click(); await sleep(550);
+            assert(text(panel()).includes('€1k Milestone') && text(panel()).includes('Not in range'), 'Unreachable detail values');
+            selected(1000, false); highlight(null); visiblePanel();
+          });
+
+        await runCase('Threshold boundaries at year zero and first projected year', 'initial 99 / 100 / 100.01, monthly 1, one year',
+          '99 projects 100 at year 1; equality and above count as achieved', async () => {
+            for (const initial of [99, 100, 100.01]) {
+              await load(fixture([person(1, 'Boundary', initial, 1)], {years:1}));
+              const d = app.win._msMilestoneData[0];
+              equal([d.isCompleted, d.projectedYear], initial < 100 ? [false,1] : [true,null], 'Initial boundary ' + initial);
+              near(app.win._milestoneRows[0].balances[0], initial + 12, 'Year-one arithmetic');
+              assert(text(tracker(100)).includes(initial < 100 ? '99%' : 'achieved'), 'Boundary visible tracker');
+            }
+            await load(fixture([person(1, 'Exactly projected', 88, 1)], {years:1}));
+            equal(app.win._milestoneRows[0].balances[0], 100, 'Exact projected threshold');
+            equal(node(100).dataset.year, '1', 'Equality first-hit year');
+          });
+
+        await runCase('Household-first rendering and excluded people', 'First 100+25/mo; Second 200+50/mo; excluded 900+100/mo',
+          'Household 300 at year zero, balances 1200/2100; household, First, Second ordering', async () => {
+            await load(fixture([person(1,'First',100,25), person(2,'Second',200,50), person(3,'Excluded',900,100)], {householdMembers:[1,2]}), 'combined');
+            equal(app.win._milestoneRows.map(r => r.name), ['Household','First','Second'], 'Household-first state ordering');
+            equal(app.win._milestoneRows.map(r => [...r.balances]), [[1200,2100],[400,700],[800,1400]], 'Household histories');
+            equal(app.win._msCurrentPortfolioValue, 300, 'Household current value excludes third person');
+            const labels = [...app.doc.querySelectorAll('.milestone-analytics-card div')]
+              .filter(el => el.style.width === '90px').map(text);
+            equal(labels, ['Household','First','Second'], 'Visible timeline ordering');
+            equal(app.win._msMilestoneData.slice(0,5).map(d => [d.isCompleted,d.projectedYear]),
+              [[true,null],[true,null],[false,1],[false,1],[false,null]], 'Household statuses');
+            assert(!text(required('.milestone-analytics-card')).includes('Excluded'), 'Excluded person rendered');
+            progress(60); highlight(null);
+            tracker(250).click(); await sleep(550);
+            assert(text(panel()).includes('Already Achieved') && text(panel()).includes('Current Portfolio €300'), 'Household achieved detail');
+            highlight(null);
+            tracker(2500).click(); await sleep(550);
+            assert(text(panel()).includes('Not in range'), 'Household unreachable detail'); highlight(null);
+          });
+
+        await runCase('Empty individual and empty household rendering', 'zero initial/contributions; then no household members',
+          'zero progress, no projected nodes/markers, empty household rows', async () => {
+            await load(fixture([person(1,'Empty',0,0)]));
+            assert(app.win._msMilestoneData.every(d => !d.isCompleted && d.projectedYear === null), 'Zero portfolio statuses');
+            assert(text(required('.milestone-analytics-card')).includes('No milestones reached yet'), 'Empty message');
+            equal(app.doc.querySelectorAll('.milestone-node').length, 0, 'Empty timeline nodes');
+            progress(0); equal(state().overlay, [], 'Zero markers');
+            await load(fixture(undefined, {householdMembers:[]}), 'combined');
+            equal(app.win._milestoneRows, [], 'Empty household rows');
+            equal(app.win._msCurrentPortfolioValue, 0, 'Empty household current value');
+            equal(app.doc.querySelectorAll('.milestone-node').length, 0, 'Empty household nodes');
+            equal(state().overlay, [], 'Empty household markers'); progress(0); highlight(null);
+          });
+
+        await runCase('All-achieved individual and household rendering', 'initial 5m individually; household 2m + 3m',
+          'all 15 achieved, last three tracker entries, no future bars/nodes/markers', async () => {
+            for (const household of [false,true]) {
+              await load(fixture(household ? [person(1,'Two million',2000000,0),person(2,'Three million',3000000,0)]
+                : [person(1,'Five million',5000000,0)]), household ? 'combined' : 1);
+              equal(app.win._msMilestoneData.filter(d => d.isCompleted).length, 15, 'All thresholds achieved');
+              equal([...app.doc.querySelectorAll('[data-ms-row]')].map(el => +el.dataset.msRow), [1000000,2000000,5000000], 'Last three achieved');
+              assert(text(required('.milestone-analytics-card')).includes('All milestones achieved'), 'All-achieved message');
+              equal(app.doc.querySelectorAll('.milestone-node').length, 0, 'No future nodes');
+              assert(!app.doc.getElementById('msProgressBar') && !app.doc.getElementById('msTrackerBar'), 'Unexpected future progress bars');
+              equal(state().overlay, [], 'All-achieved chart markers'); highlight(null);
+            }
+          });
+
+        await runCase('Projected hover, leave, click, toggle and selected persistence', 'First balances 400/700; projected 250(y1), 500(y2)',
+          'hover previews; click synchronizes tracker/node; leave preserves selection; second click clears', async () => {
+            await load();
+            event(node(250), 'mouseover');
+            projectedDetails('First','€250','yr 1','€400'); highlight(1);
+            event(node(250), 'mouseleave'); await sleep(550);
+            equal(text(panel()), placeholder, 'Leave placeholder'); highlight(null);
+            node(250).click(); await sleep(550);
+            projectedDetails('First','€250','yr 1','€400'); selected(250); highlight(1);
+            event(node(500), 'mouseover');
+            projectedDetails('First','€250','yr 1','€400'); highlight(2);
+            event(node(500), 'mouseleave'); await sleep(550);
+            projectedDetails('First','€250','yr 1','€400'); selected(250); highlight(1);
+            assert(!app.doc.querySelector('.ms-ripple-ring'), 'Ripple not removed after its lifetime');
+            node(250).click(); await sleep(550);
+            equal(text(panel()), placeholder, 'Toggle placeholder');
+            equal(app.doc.querySelectorAll('.ms-selected').length, 0, 'Toggle clears selections'); highlight(null);
+          });
+
+        await runCase('Hovered-row preview versus primary-row click details', 'household 1200/2100; First 400/700',
+          'First 500 hover: y2/700; clicking that node selects Household y1/1200', async () => {
+            await load(fixture(), 'combined');
+            event(node(500,1), 'mouseover');
+            projectedDetails('First','€500','yr 2','€700'); highlight(2);
+            node(500,1).click(); await sleep(550);
+            projectedDetails('Household','€500','yr 1','€1.200'); selected(500); highlight(1);
+            equal(required('.milestone-node.ms-selected').dataset.ridx, '0', 'Primary timeline node selected');
+            event(node(1000,2), 'mouseover');
+            projectedDetails('Household','€500','yr 1','€1.200'); highlight(2);
+            event(node(1000,2), 'mouseleave'); await sleep(550);
+            projectedDetails('Household','€500','yr 1','€1.200'); highlight(1);
+          });
+
+        await runCase('Rapid select/select settles at the latest milestone', '250 click, then 500 click in same task',
+          '500 selected, yr 2/700 details, active year 2', async () => {
+            await load(); mark('click 250'); tracker(250).click(); mark('click 500'); tracker(500).click();
+            await sleep(700);
+            projectedDetails('First','€500','yr 2','€700'); selected(500); highlight(2); progress(40);
+          });
+
+        await runCase('Rapid select/deselect/select keeps latest selected details', '250 click, toggle 250 off, then 500 click in same task',
+          '500 remains visibly selected with yr 2/700 details after 210ms reset and panel fade', async () => {
+            await load(); mark('click 250'); tracker(250).click(); mark('toggle 250 off'); tracker(250).click();
+            mark('click 500'); tracker(500).click();
+            await sleep(150); mark('after panel-swap delay', {panel: text(panel())});
+            await sleep(550); mark('inspect settled panel');
+            selected(500); highlight(2); progress(40);
+            projectedDetails('First','€500','yr 2','€700');
+          });
+
+        await runCase('Rapid hover/leave/click/leave preserves selected detail', 'hover 250, leave; hover/click 500, leave before reset',
+          '500 yr 2/700 details survive pending hover reset; active year 2', async () => {
+            await load(); event(node(250),'mouseover'); event(node(250),'mouseleave');
+            event(node(500),'mouseover'); node(500).click(); event(node(500),'mouseleave');
+            await sleep(700);
+            projectedDetails('First','€500','yr 2','€700'); selected(500); highlight(2);
+          });
+
+        await runCase('Rapid click/toggle/hover keeps latest unselected preview', 'click 250, toggle off, hover 500 in same task',
+          'unselected 500 hover preview stays visible after pending panel/reset timers', async () => {
+            await load(); mark('click 250'); tracker(250).click(); mark('toggle 250 off'); tracker(250).click();
+            mark('hover 500'); event(node(500),'mouseover');
+            mark('immediate preview', {panel: text(panel())});
+            await sleep(150); mark('after panel-swap delay', {panel: text(panel())});
+            await sleep(550); mark('inspect settled preview');
+            equal(app.doc.querySelectorAll('.ms-selected').length, 0, 'Preview has no selection'); highlight(2);
+            projectedDetails('First','€500','yr 2','€700');
+          });
+
+        await runCase('Person switching while progress update is pending', 'First 40% to 250 -> Second 80% to 250 before 80ms',
+          'Second rows/current value, 80% visible bars, placeholder and no selection/highlight', async () => {
+            await load(fixture(), 1, false, false); mark('switch to Second'); app.win.highlightTarget(2);
+            await sleep(1600);
+            equal(app.win._milestoneRows.map(r => r.name), ['Second'], 'Latest person');
+            equal(app.win._msCurrentPortfolioValue, 200, 'Latest current value');
+            progress(80); equal(text(panel()), placeholder, 'New person placeholder');
+            equal(app.doc.querySelectorAll('.ms-selected').length, 0, 'New person selection'); highlight(null);
+            equal(state().overlay, [{year:1,label:'€250'},{year:1,label:'€500'},{year:2,label:'€1k'}], 'Latest markers');
+          });
+
+        await runCase('Person switching while detail panel swap is pending', 'select First 500, switch to Second before 110ms, select Second 1000',
+          'latest Second details yr 2/1400; 80% bars; latest selection and markers', async () => {
+            await load(); tracker(500).click(); mark('switch during panel fade'); app.win.highlightTarget(2);
+            tracker(1000).click(); await sleep(1600);
+            projectedDetails('Second','€1k','yr 2','€1.400'); selected(1000); highlight(2); progress(80);
+            equal(app.win._milestoneRows.map(r => r.name), ['Second'], 'Latest detail rows');
+            equal(state().overlay, [{year:1,label:'€250'},{year:1,label:'€500'},{year:2,label:'€1k'}], 'Latest detail markers');
+          });
+
+        await runCase('Recalculation while progress and panel updates are pending', 'select First 500; initial 100->200->300 before delayed work finishes',
+          'latest balances 600/900, progress 60% to 500, placeholder, cleared selection/year', async () => {
+            await load(fixture(),1,false,false); tracker(500).click();
+            mark('initial 200'); input('initial-1',200); mark('initial 300'); input('initial-1',300);
+            await sleep(1600);
+            equal(app.win._milestoneRows[0].balances, [600,900], 'Latest recalculation balances');
+            equal(app.win._msCurrentPortfolioValue, 300, 'Latest initial'); progress(60);
+            equal(text(panel()), placeholder, 'Recalculation placeholder');
+            equal(app.doc.querySelectorAll('.ms-selected').length, 0, 'Recalculation selection'); highlight(null);
+            equal(state().overlay, [{year:1,label:'€500'}], 'Recalculation markers');
+          });
+
+        await runCase('Tab switching while progress and panel work is pending', 'Milestones -> Profit, then Milestones; update initial to 300 and select 500',
+          'Profit clears milestone chart state; return shows latest yr 1/600 details and 60% progress', async () => {
+            await load(fixture(),1,false,false); tracker(500).click(); mark('leave for Profit'); app.win.setAnalysisTab('profit');
+            await sleep(700);
+            assert(!app.doc.getElementById('msDetailsPanel'), 'Milestone panel retained in Profit');
+            assert(app.doc.getElementById('profitDonutCanvas'), 'Profit not rendered');
+            equal(state().overlay, [], 'Profit milestone markers'); highlight(null);
+            input('initial-1',300); app.win.setAnalysisTab('milestones'); tracker(500).click();
+            await sleep(1600);
+            projectedDetails('First','€500','yr 1','€600'); selected(500); highlight(1); progress(60);
+          });
+
+        await runCase('Leave and immediately return during delayed milestone work', 'select 500, Profit -> Milestones in same task, initial 200, select 500',
+          'latest yr 1/500 detail, 80% to 250, latest selection/chart markers', async () => {
+            await load(fixture(),1,false,false); tracker(500).click(); app.win.setAnalysisTab('profit');
+            input('initial-1',200); app.win.setAnalysisTab('milestones'); tracker(500).click();
+            await sleep(1600);
+            projectedDetails('First','€500','yr 1','€500'); selected(500); highlight(1); progress(80);
+            equal(state().overlay, [{year:1,label:'€250'},{year:1,label:'€500'}], 'Return markers');
+          });
+
+        await runCase('Analysis exit while progress and panel work is pending', 'select 500 then exit before 80/110ms; reopen Second after settling',
+          'overview has no milestone UI/selection/chart markers; reopening has latest Second values', async () => {
+            await load(fixture(),1,false,false); tracker(500).click(); mark('exit analysis'); app.win.exitAnalysisMode();
+            await sleep(1600);
+            for (const id of ['msDetailsPanel','msProgressBar','msTrackerBar']) assert(!app.doc.getElementById(id), 'Exited UI retains ' + id);
+            equal(app.doc.querySelectorAll('.ms-selected').length, 0, 'Exit selection');
+            equal(state().target, null, 'Exit analysis target'); equal(state().overlay, [], 'Exit markers'); highlight(null);
+            assert(text(required('#combinedResults')).includes('Total'), 'Overview not visible');
+            app.win.highlightTarget(2); app.win.setAnalysisTab('milestones'); await sleep(1600);
+            progress(80); equal(text(panel()), placeholder, 'Reopened placeholder'); highlight(null);
+            equal(app.win._milestoneRows.map(r => r.name), ['Second'], 'Reopened person');
+          });
+
+        await runCase('Inflation preserves current-value classification and adjusted projection', 'initial 100, monthly 50, two years, 0% return, 50% inflation',
+          'current 100 achieved; balances 700/1.5 and 1300/2.25; 500 first met at year 2', async () => {
+            await load(fixture([person(1,'Inflation',100,50)], {useInflation:true,inflationRate:50}));
+            near(app.win._milestoneRows[0].balances[0], 700/1.5, 'Inflated year one');
+            near(app.win._milestoneRows[0].balances[1], 1300/2.25, 'Inflated year two');
+            equal(app.win._msMilestoneData[0].isCompleted, true, 'Year-zero achievement unaffected');
+            equal(node(500).dataset.year, '2', 'Inflation shifts 500 to year two');
+            node(500).click(); await sleep(550);
+            projectedDetails('Inflation','€500','yr 2','€578'); highlight(2); progress(40);
+          });
+
+        await runCase('Currency, calendar year, dark theme and escaped-name display', 'household in dollars from 2030; literal HTML-like First name; dark mode',
+          '$1.1k tracker versus $1k timeline; hovered First literal name, 2031, $756; dark household color', async () => {
+            const name = '<img src=x onerror="window.milestoneNameExecuted=1"> & "First"';
+            await load(fixture([person(1,name,100,25),person(2,'Second',200,50)], {currency:'$',startYear:2030}), 'combined', true);
+            assert(app.doc.body.classList.contains('dark-mode'), 'Dark mode missing');
+            equal(app.win._milestoneRows[0].color, '#9ca3af', 'Dark household color');
+            const timeline = [...app.doc.querySelectorAll('.milestone-analytics-card div')].find(el => text(el) === 'Milestone Timeline').parentElement;
+            equal(timeline.style.backgroundColor, 'rgb(42, 42, 42)', 'Dark timeline background');
+            assert(text(tracker(1000)).includes('$1.1k'), 'Tracker fractional thousands conversion');
+            equal(node(1000,0).dataset.label, '$1k', 'Preserved timeline rounding');
+            equal(node(500,1).dataset.year, '2', 'Calendar uses offset state');
+            assert(node(500,1).title.includes('2031'), 'Calendar node tooltip');
+            event(node(500,1),'mouseover');
+            projectedDetails(name,'$540','2031','$756'); highlight(2);
+            equal(app.doc.querySelectorAll('.milestone-analytics-card img').length, 0, 'Names rendered as text');
+            assert(!app.win.milestoneNameExecuted, 'Escaped name executed HTML');
+            equal(app.chart.data.labels, ['2030','2031'], 'Calendar chart labels'); progress(60);
+          });
+
+        await runCase('Light theme and calendar retirement annotation', 'First initial100/monthly25; pension age32/current30; start2030',
+          'light timeline background, retirement line labeled 2031 retire, offset2 retained', async () => {
+            const f = fixture([person(1,'Calendar',100,25)], {startYear:2030});
+            f.people[0].retirementSettings.statePensionEnabled = true;
+            f.people[0].retirementSettings.statePensionAge = 32;
+            await load(f);
+            assert(!app.doc.body.classList.contains('dark-mode'), 'Light mode missing');
+            const timeline = [...app.doc.querySelectorAll('.milestone-analytics-card div')].find(el => text(el) === 'Milestone Timeline').parentElement;
+            equal(timeline.style.backgroundColor, 'rgb(255, 255, 255)', 'Light timeline background');
+            const line = required('[title="Retirement — 2031"]');
+            equal(line.style.pointerEvents, 'none', 'Retirement line does not intercept input');
+            assert(text(required('.milestone-analytics-card')).includes('2031 retire'), 'Retirement axis label');
+            node(500).click(); await sleep(550);
+            projectedDetails('Calendar','€500','2031','€700'); highlight(2);
+          });
+
+        await runCase('No browser exceptions across milestone interactions', 'all fixtures and delayed interactions',
+          'no error or unhandled rejection events', async () => { equal(browserErrors, [], 'Browser errors'); });
+      } finally {
+        if (app) app.drawing.restore();
+        frame.remove();
+        keys.forEach((key, i) => {
+          if (previous[i] === null) localStorage.removeItem(key);
+          else localStorage.setItem(key, previous[i]);
+        });
+      }
+
+      const failures = checks.filter(check => !check.passed);
+      const assertionFailures = failures.filter(check => check.failureType === 'assertion').length;
+      const runnerProblems = failures.filter(check => check.failureType === 'runner').length;
+      window.milestoneTestResults = {checks, browserErrors, assertionFailures, runnerProblems};
+      status.className = failures.length ? 'fail' : 'pass';
+      status.textContent = `${failures.length ? 'FAILED' : 'PASS'} (${checks.length - failures.length}/${checks.length})\n\n`
+        + `Assertion failures: ${assertionFailures}; test-runner problems: ${runnerProblems}\n\n`
+        + checks.map(check => `${check.passed ? 'PASS' : 'FAIL'} ${check.name}\nInputs: ${check.inputs}\nExpected: ${check.expectation}\n`
+          + `${check.error ? 'Failure (' + check.failureType + '): ' + check.error + '\n' : ''}Actual: ${JSON.stringify(check.actual)}\nTrace: ${JSON.stringify(check.trace)}`).join('\n\n');
+    })().catch(error => {
+      const status = document.getElementById('status');
+      status.className = 'fail';
+      status.textContent = `TEST RUNNER ERROR: ${error.stack}`;
+    });
+  </script>
+</body>
+</html>
