@@ -88,6 +88,7 @@ The current cleanup separates calculations and cohesive interface features from 
 | `js/displayUtils.js` | Color helpers, currency formatting and display conversion, and display-year helpers. |
 | `js/analyticsCharts.js` | Portfolio expansion and profit donut charts, including lifecycle, animations, and hover interactions. |
 | `js/resultsUI.js` | Overview portfolio summary cards and clickable portfolio-split graphic, plus selected-person and household top summaries. Uses currency helpers and the controller's mini-pie and name-escaping helpers; calculations, selection, analysis, and modal state remain in `app.js`. |
+| `js/retirementUI.js` | Retirement analysis HTML, rows, income annotations, and delayed hero count-up/chart markers. Uses retirement calculation and display helpers, plus shared scenario, selection, badge, duration, and chart state in `app.js`; its caller, badge callbacks, duration locking, chart plugins, and onboarding remain there. |
 | `README.md` | Project orientation, current scope, file responsibilities, development priorities, and working instructions. |
 
 ### Script order
@@ -104,7 +105,8 @@ The current cleanup separates calculations and cohesive interface features from 
 8. `investmentCalculations.js`
 9. `householdCalculations.js`
 10. `resultsUI.js`
-11. `app.js`
+11. `retirementUI.js`
+12. `app.js`
 
 Some earlier functions use state or helpers defined in `app.js` when called later. Loading a file successfully does not establish that every dependency has been initialized.
 
