@@ -1,0 +1,11 @@
+root = true
+
+[*]
+charset = utf-8
+trim_trailing_whitespace = false
+insert_final_newline = false
+# Existing files use LF, CRLF, and mixed endings; preserve them.
+
+[*.{html,css,js,ps1}]
+indent_style = space
+indent_size = 2

@@ -61,7 +61,9 @@ A projected person is a planning record, not a signed-in user. Selecting people 
 
 The application uses HTML, CSS, ordinary JavaScript, and Chart.js. There is no build step, package installation, or frontend framework.
 
-`index.html` is the entry point. Chart.js loads from the jsDelivr CDN, so chart views and the full browser tests require internet access.
+`index.html` is the entry point. Chart.js is pinned to version 4.5.1 using the minified UMD browser build at `https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js`. This matches the version observed in the running planner before pinning. Chart views and the full browser tests require internet access.
+
+The root `.editorconfig` uses UTF-8 and two-space indentation for HTML, CSS, JavaScript, and PowerShell. It leaves line endings unspecified and disables automatic trailing-whitespace trimming and final-newline insertion to preserve existing formatting. Keep Git's repository-local `core.autocrlf=false`; do not normalize or reformat existing files as part of unrelated edits.
 
 The JavaScript files are regular browser scripts, not ES modules. They share some global state and functions. Their order matters: keep `app.js` last and inspect dependencies before changing script loading.
 
