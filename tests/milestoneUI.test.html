@@ -15,7 +15,7 @@
 </head>
 <body>
   <h1>Milestone UI characterization</h1>
-  <p>Serve the project with <code>Get-Content .\scripts\serveAppCalculationTests.ps1 -Raw | Invoke-Expression</code> and open <code>http://127.0.0.1:8765/tests/milestoneUI.test.html</code> in a fresh browser profile or private session. Run suites one at a time. This page uses the real planner and normal animation timing, restores its previous plan/theme keys afterward, and refuses <code>file://</code>. Known lifecycle failures remain failing assertions; see <code>docs/history/milestone-characterization.md</code>.</p>
+  <p>Serve the project with <code>Get-Content .\scripts\serveAppCalculationTests.ps1 -Raw | Invoke-Expression</code> and open <code>http://127.0.0.1:8765/tests/milestoneUI.test.html</code> in a fresh browser profile or private session. Run suites one at a time. This page uses the real planner and normal animation timing, restores its previous plan/theme keys afterward, and refuses <code>file://</code>. Original race assertions are retained; see <code>docs/history/milestone-panel-lifecycle.md</code> for their fix.</p>
   <div id="status">Starting checks...</div>
   <iframe id="planner" title="Isolated planner under test"></iframe>
   <script>
@@ -466,6 +466,58 @@
             assert(text(required('.milestone-analytics-card')).includes('2031 retire'), 'Retirement axis label');
             node(500).click(); await sleep(550);
             projectedDetails('Calendar','€500','2031','€700'); highlight(2);
+          });
+
+        await runCase('New hover preview supersedes a pending hover-leave reset', 'hover 250, leave, hover 500 before 210ms',
+          'unselected First 500/year2/700 preview survives the obsolete leave reset', async () => {
+            await load(); event(node(250),'mouseover'); event(node(250),'mouseleave');
+            event(node(500),'mouseover'); await sleep(550);
+            projectedDetails('First','€500','yr 2','€700'); highlight(2); progress(40);
+            equal(app.doc.querySelectorAll('.ms-selected').length, 0, 'Hover stays unselected');
+          });
+
+        await runCase('Obsolete fade-in frame cannot change a newer preview', 'capture ordinary 250 fade-in, toggle off and hover 500, deliver captured frame again',
+          'new preview HTML and style remain unchanged; ordinary frame timing still 110ms then RAF', async () => {
+            await load();
+            const oldPanel = panel();
+            const originalRAF = app.win.requestAnimationFrame;
+            let oldFrame;
+            app.win.requestAnimationFrame = function(fn) {
+              if (oldPanel.style.transform === 'translateY(-5px)' && text(oldPanel).includes('€250 Milestone')) oldFrame = fn;
+              return originalRAF.call(this, fn);
+            };
+            try { tracker(250).click(); await sleep(175); }
+            finally { app.win.requestAnimationFrame = originalRAF; }
+            assert(oldFrame, 'Ordinary panel fade-in frame was not captured');
+            tracker(250).click(); event(node(500),'mouseover');
+            const before = [oldPanel.innerHTML, oldPanel.style.cssText, oldPanel.dataset.hasContent];
+            oldFrame(app.win.performance.now());
+            equal([oldPanel.innerHTML, oldPanel.style.cssText, oldPanel.dataset.hasContent], before, 'Obsolete frame ownership');
+            await sleep(550); projectedDetails('First','€500','yr 2','€700'); highlight(2);
+          });
+
+        await runCase('Replaced panels receive no delayed writes', 'pending selection swap across person switch, recalculation, tab switch, and exit',
+          'detached panel HTML/styles/content flag remain unchanged; replacement state belongs to latest view', async () => {
+            for (const transition of ['person','recalculation','tab','exit']) {
+              await load(); tracker(250).click();
+              const oldPanel = panel();
+              if (transition === 'person') app.win.highlightTarget(2);
+              else if (transition === 'recalculation') input('initial-1',300);
+              else if (transition === 'tab') app.win.setAnalysisTab('profit');
+              else app.win.exitAnalysisMode();
+              assert(!oldPanel.isConnected, transition + ' did not replace the panel');
+              const before = [oldPanel.innerHTML, oldPanel.style.cssText, oldPanel.dataset.hasContent];
+              await sleep(1600);
+              equal([oldPanel.innerHTML, oldPanel.style.cssText, oldPanel.dataset.hasContent], before, transition + ' detached panel writes');
+              equal(app.doc.querySelectorAll('.ms-selected').length, 0, transition + ' clears selection'); highlight(null);
+              if (transition === 'person' || transition === 'recalculation') {
+                equal(text(panel()), placeholder, transition + ' new placeholder');
+                progress(transition === 'person' ? 80 : 60);
+              } else {
+                assert(!app.doc.getElementById('msDetailsPanel'), transition + ' retains a panel');
+                equal(state().overlay, [], transition + ' clears markers');
+              }
+            }
           });
 
         await runCase('No browser exceptions across milestone interactions', 'all fixtures and delayed interactions',

@@ -118,7 +118,7 @@ Some earlier functions use state or helpers defined in `app.js` when called late
 | `tests/appCalculation.test.html` | Planner calculations, personal rates, persistence, projections, household selection, and all-person totals. |
 | `tests/retirementCalculation.test.html` | Retirement rows, pension and additional income, inflation, scenarios, and per-person settings. |
 | `tests/retirementLifecycle.test.html` | Retirement delayed callbacks, person switching, hero animation, marker state, row hover, and duration locking. |
-| `tests/milestoneUI.test.html` | Milestone rendering, details, selection, chart highlighting, and delayed-interaction characterization; known lifecycle failures remain failing assertions. |
+| `tests/milestoneUI.test.html` | Milestone rendering, details, selection, chart highlighting, and detail-panel lifecycle regressions. |
 | `tests/profitDonut.test.html` | Delayed chart creation, rapid recalculation, view switching, latest values, and donut/KPI interactions. |
 | `scripts/serveAppCalculationTests.ps1` | Local PowerShell web server for the application and browser tests. |
 
@@ -136,6 +136,7 @@ Keep these test files. They are development tools that protect behavior during c
 | `docs/history/unused-combined-cleanup.md` | Removal of unused all-person accumulators and updates to their tests. |
 | `docs/history/profit-donut-lifecycle.md` | Reproduction and resolution of the delayed profit-donut chart race. |
 | `docs/history/milestone-characterization.md` | Milestone UI characterization results, known delayed-panel failures, and verification limits before extraction. |
+| `docs/history/milestone-panel-lifecycle.md` | Fix and verification of superseded milestone detail-panel timers and animation frames. |
 
 These reports record particular changes. Historical line numbers, test counts, and unresolved issues may have been superseded. Use the current code and latest relevant report when assessing present behavior.
 
@@ -188,7 +189,7 @@ The app-driving suites use the real planner in an iframe and restore their previ
 
 Use normal browser timing for the donut interaction suite. Deliberate invalid-input tests may produce expected number-field warnings.
 
-Use normal browser timing for the milestone suite as well. It checks settled panel contents, progress widths, selection classes, and chart drawing. Its known delayed-panel failures are documented in `docs/history/milestone-characterization.md`; they are not suppressed or treated as passing results. The output distinguishes assertion failures from test-runner problems.
+Use normal browser timing for the milestone suite as well. It checks settled panel contents, progress widths, selection classes, and chart drawing. The original delayed-panel race assertions are retained and now pass through the fix documented in `docs/history/milestone-panel-lifecycle.md`. The output distinguishes assertion failures from test-runner problems.
 
 ## Known interpretation questions
 

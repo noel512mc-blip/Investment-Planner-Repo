@@ -2598,6 +2598,24 @@ function clearAnalysisFocus() {
 
 
 // ── UNIFIED MILESTONE SELECTION ──────────────────────────────
+let milestonePanelGeneration = 0;
+let milestonePanelTimer = null;
+let milestonePanelFrame = null;
+
+function clearMilestonePanelWork() {
+  milestonePanelGeneration++;
+  clearTimeout(milestonePanelTimer);
+  cancelAnimationFrame(milestonePanelFrame);
+  milestonePanelTimer = null;
+  milestonePanelFrame = null;
+  return milestonePanelGeneration;
+}
+
+function ownsMilestonePanel(panel, generation) {
+  return generation === milestonePanelGeneration && panel.isConnected
+    && document.getElementById('msDetailsPanel') === panel;
+}
+
 function deselectAllMilestones() {
   document.querySelectorAll('[data-ms-row]').forEach(r => r.classList.remove('ms-selected'));
   document.querySelectorAll('.milestone-node').forEach(n => n.classList.remove('ms-selected'));
@@ -2605,10 +2623,13 @@ function deselectAllMilestones() {
   if (chart) chart.update('none');
   const panel = document.getElementById('msDetailsPanel');
   if (panel) {
+    const generation = clearMilestonePanelWork();
     panel.style.transition = `opacity ${ANIM.fast}ms, transform ${ANIM.fast}ms`;
     panel.style.opacity = '0';
     panel.style.transform = 'translateY(4px)';
-    setTimeout(() => {
+    milestonePanelTimer = setTimeout(() => {
+      if (!ownsMilestonePanel(panel, generation)) return;
+      milestonePanelTimer = null;
       panel.dataset.hasContent = '0';
       panel.style.display = 'flex';
       panel.innerHTML = 'Hover or click a milestone to see details';
@@ -2723,9 +2744,12 @@ function onMilestoneNodeLeave(el) {
     if (!document.querySelector('[data-ms-row].ms-selected')) {
       const panel = document.getElementById('msDetailsPanel');
       if (panel && panel.dataset.hasContent === '1') {
+        const generation = clearMilestonePanelWork();
         panel.style.transition = `opacity ${ANIM.fast}ms`;
         panel.style.opacity = '0';
-        setTimeout(() => {
+        milestonePanelTimer = setTimeout(() => {
+          if (!ownsMilestonePanel(panel, generation)) return;
+          milestonePanelTimer = null;
           if (!document.querySelector('.milestone-node:hover, [data-ms-row].ms-selected')) {
             panel.dataset.hasContent = '0';
             panel.style.display = 'flex';
@@ -2822,17 +2846,22 @@ function updateMilestoneDetailsUnreachable(info) {
 function _animateMilestonePanel(html) {
   const panel = document.getElementById('msDetailsPanel');
   if (!panel) return;
+  const generation = clearMilestonePanelWork();
   panel.dataset.hasContent = '1';
   const _halfFast = Math.round(ANIM.fast / 2);
   panel.style.transition = `opacity ${_halfFast}ms, transform ${_halfFast}ms`;
   panel.style.opacity = '0';
   panel.style.transform = 'translateY(5px)';
-  setTimeout(() => {
+  milestonePanelTimer = setTimeout(() => {
+    if (!ownsMilestonePanel(panel, generation)) return;
+    milestonePanelTimer = null;
     panel.style.display = 'block';
     panel.innerHTML = html;
     panel.style.transform = 'translateY(-5px)';
     panel.style.opacity = '0';
-    requestAnimationFrame(() => {
+    milestonePanelFrame = requestAnimationFrame(() => {
+      if (!ownsMilestonePanel(panel, generation)) return;
+      milestonePanelFrame = null;
       panel.style.transition = `opacity ${ANIM.standard}ms, transform ${ANIM.standard}ms`;
       panel.style.opacity = '1';
       panel.style.transform = 'translateY(0)';
@@ -2844,9 +2873,12 @@ function _animateMilestonePanel(html) {
 function updateMilestoneDetailsInstant(info) {
   const panel = document.getElementById('msDetailsPanel');
   if (!panel) return;
+  clearMilestonePanelWork();
   panel.dataset.hasContent = '1';
   panel.style.display = 'block';
   panel.innerHTML = buildMilestoneDetailHTML(info);
+  panel.style.opacity = '1';
+  panel.style.transform = 'translateY(0)';
 }
 
 function updateMilestoneDetails(info) {
@@ -3391,6 +3423,7 @@ const bottomResults =
 combinedResults.innerHTML = '';
 clearProfitDonut();
 clearRetirementRender();
+clearMilestonePanelWork();
 personResults.innerHTML = '';
 
 bottomResults.innerHTML = '';
