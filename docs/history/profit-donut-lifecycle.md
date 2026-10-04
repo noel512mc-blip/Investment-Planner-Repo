@@ -39,7 +39,7 @@ No changes to financial formulas, household calculations, storage, CSS, other ch
 
 ## Running the regression
 
-Run the existing js/serveAppCalculationTests.ps1 server, then open http://127.0.0.1:8765/js/profitDonut.test.html. The suite restores existing test-origin plan keys afterward. Use normal browser timing for the animation/interaction case. The iframe is visible during execution to avoid hidden-frame animation throttling and is removed at completion.
+From PowerShell at the project root, run `Get-Content .\scripts\serveAppCalculationTests.ps1 -Raw | Invoke-Expression`, then open http://127.0.0.1:8765/tests/profitDonut.test.html. The suite restores existing test-origin plan keys afterward. Use normal browser timing for the animation/interaction case. The iframe is visible during execution to avoid hidden-frame animation throttling and is removed at completion.
 
 ## Results
 

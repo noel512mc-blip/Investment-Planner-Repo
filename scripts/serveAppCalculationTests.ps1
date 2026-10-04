@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $scriptDirectory = $PSScriptRoot
-if (-not $scriptDirectory) { $scriptDirectory = Join-Path (Get-Location).Path 'js' }
+if (-not $scriptDirectory) { $scriptDirectory = Join-Path (Get-Location).Path 'scripts' }
 $root = [System.IO.Path]::GetFullPath((Join-Path $scriptDirectory '..'))
 $rootPrefix = $root.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
 $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 8765)
@@ -8,8 +8,8 @@ $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopba
 try {
   $listener.Start()
   Write-Host 'Serving Milestone test files at http://127.0.0.1:8765/'
-  Write-Host 'Calculation checks: http://127.0.0.1:8765/js/appCalculation.test.html'
-  Write-Host 'Retirement checks:  http://127.0.0.1:8765/js/retirementCalculation.test.html'
+  Write-Host 'Calculation checks: http://127.0.0.1:8765/tests/appCalculation.test.html'
+  Write-Host 'Retirement checks:  http://127.0.0.1:8765/tests/retirementCalculation.test.html'
   Write-Host 'Press Ctrl+C to stop.'
 
   while ($true) {

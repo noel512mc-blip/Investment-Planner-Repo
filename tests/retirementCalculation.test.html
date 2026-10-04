@@ -12,11 +12,11 @@
     #status.fail { background: #fef2f2; color: #991b1b; }
     iframe { position: fixed; left: -1400px; top: 0; width: 1280px; height: 900px; border: 0; }
   </style>
-  <script src="./retirementCalculations.js"></script>
+  <script src="../js/retirementCalculations.js"></script>
 </head>
 <body>
   <h1>Milestone retirement characterization</h1>
-  <p>This standalone suite drives the real planner in an iframe and asserts displayed retirement rows and status changes. From PowerShell at the workspace root, run <code>Get-Content .\js\serveAppCalculationTests.ps1 -Raw | Invoke-Expression</code>, then open <code>http://127.0.0.1:8765/js/retirementCalculation.test.html</code>. Press Ctrl+C to stop the server. It refuses to run from <code>file://</code> so normal planner storage is not touched.</p>
+  <p>This standalone suite drives the real planner in an iframe and asserts displayed retirement rows and status changes. From PowerShell at the workspace root, run <code>Get-Content .\scripts\serveAppCalculationTests.ps1 -Raw | Invoke-Expression</code>, then open <code>http://127.0.0.1:8765/tests/retirementCalculation.test.html</code>. Press Ctrl+C to stop the server. It refuses to run from <code>file://</code> so normal planner storage is not touched.</p>
   <div id="status">Starting retirement checks...</div>
   <iframe id="planner" title="Isolated planner under test"></iframe>
   <script>

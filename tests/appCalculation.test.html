@@ -15,7 +15,7 @@
 </head>
 <body>
   <h1>Milestone calculation characterization</h1>
-  <p>This standalone suite loads the real planner in an iframe and asserts numeric results. From PowerShell at the workspace root, run <code>Get-Content .\js\serveAppCalculationTests.ps1 -Raw | Invoke-Expression</code>, then open <code>http://127.0.0.1:8765/js/appCalculation.test.html</code>. Press Ctrl+C to stop the server. It refuses to run from <code>file://</code> so the planner's normal file-page storage is not touched.</p>
+  <p>This standalone suite loads the real planner in an iframe and asserts numeric results. From PowerShell at the workspace root, run <code>Get-Content .\scripts\serveAppCalculationTests.ps1 -Raw | Invoke-Expression</code>, then open <code>http://127.0.0.1:8765/tests/appCalculation.test.html</code>. Press Ctrl+C to stop the server. It refuses to run from <code>file://</code> so the planner's normal file-page storage is not touched.</p>
   <div id="status">Starting checks...</div>
   <iframe id="planner" title="Isolated planner under test"></iframe>
   <script>
@@ -282,7 +282,7 @@
           'Two supplied base results: A yearly [110,120], invested 120, profit 0; B [220,250], invested 220, profit 30. Bull yearly A [115,132], B [240,290]; bear A [105,108], B [210,225]. Repeat with base-only 10% inflation adjustment.',
           'Base years [330,370], invested 340, profit 30; bull [355,422], bear [315,333]. With inflation divide base year y by 1.1^y and profit by 1.1^2, leaving invested and scenarios nominal. Excluded inputs add nothing; later source changes cannot alter accumulated numbers.',
           async () => {
-            const url = new URL('householdCalculations.js', location.href).href;
+            const url = new URL('../js/householdCalculations.js', location.href).href;
             const workerSource = `
               importScripts(${JSON.stringify(url)});
               onmessage = () => {
@@ -450,7 +450,7 @@
           'Original 0%/8% snapshots, inflation off/on; highlighted and unhighlighted; delayed/increased/stopped contributions.',
           'All five fields match original numeric snapshots; unhighlighted bull/bear are null; inputs are unchanged.',
           async () => {
-            const urls = ['simulateInvestment.js', 'investmentCalculations.js'].map(file => new URL(file, location.href).href);
+            const urls = ['simulateInvestment.js', 'investmentCalculations.js'].map(file => new URL('../js/' + file, location.href).href);
             const workerSource = `
               importScripts(...${JSON.stringify(urls)});
               onmessage = event => {

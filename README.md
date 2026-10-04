@@ -110,11 +110,11 @@ Some earlier functions use state or helpers defined in `app.js` when called late
 
 | File | Purpose |
 | --- | --- |
-| `js/simulateInvestment.test.html` | Direct numeric checks of the investment simulator. |
-| `js/appCalculation.test.html` | Planner calculations, personal rates, persistence, projections, household selection, and all-person totals. |
-| `js/retirementCalculation.test.html` | Retirement rows, pension and additional income, inflation, scenarios, and per-person settings. |
-| `js/profitDonut.test.html` | Delayed chart creation, rapid recalculation, view switching, latest values, and donut/KPI interactions. |
-| `js/serveAppCalculationTests.ps1` | Local PowerShell web server for the application and browser tests. |
+| `tests/simulateInvestment.test.html` | Direct numeric checks of the investment simulator. |
+| `tests/appCalculation.test.html` | Planner calculations, personal rates, persistence, projections, household selection, and all-person totals. |
+| `tests/retirementCalculation.test.html` | Retirement rows, pension and additional income, inflation, scenarios, and per-person settings. |
+| `tests/profitDonut.test.html` | Delayed chart creation, rapid recalculation, view switching, latest values, and donut/KPI interactions. |
+| `scripts/serveAppCalculationTests.ps1` | Local PowerShell web server for the application and browser tests. |
 
 Keep these test files. They are development tools that protect behavior during changes, although they are not linked from the user-facing page.
 
@@ -123,12 +123,12 @@ Keep these test files. They are development tools that protect behavior during c
 | File | Purpose |
 | --- | --- |
 | `docs/data-model.md` | Current prototype data shape and a proposed future model. The proposed model is not implemented. |
-| `docs/zero-return-fix.md` | Historical report about preserving valid 0% personal returns. References to its delivery ZIP are historical. |
-| `docs/household-characterization.md` | Independent arithmetic and tests for selected-household behavior. |
-| `docs/household-extraction.md` | Household accumulator extraction and its verification. |
-| `docs/combined-characterization.md` | Earlier all-person characterization, including private accumulators subsequently removed. |
-| `docs/unused-combined-cleanup.md` | Removal of unused all-person accumulators and updates to their tests. |
-| `docs/profit-donut-lifecycle.md` | Reproduction and resolution of the delayed profit-donut chart race. |
+| `docs/history/zero-return-fix.md` | Historical report about preserving valid 0% personal returns. References to its delivery ZIP are historical. |
+| `docs/history/household-characterization.md` | Independent arithmetic and tests for selected-household behavior. |
+| `docs/history/household-extraction.md` | Household accumulator extraction and its verification. |
+| `docs/history/combined-characterization.md` | Earlier all-person characterization, including private accumulators subsequently removed. |
+| `docs/history/unused-combined-cleanup.md` | Removal of unused all-person accumulators and updates to their tests. |
+| `docs/history/profit-donut-lifecycle.md` | Reproduction and resolution of the delayed profit-donut chart race. |
 
 These reports record particular changes. Historical line numbers, test counts, and unresolved issues may have been superseded. Use the current code and latest relevant report when assessing present behavior.
 
@@ -139,7 +139,7 @@ Open `index.html` directly in a browser, or serve the project locally.
 From a PowerShell terminal in the project root:
 
 ```powershell
-Get-Content .\js\serveAppCalculationTests.ps1 -Raw | Invoke-Expression
+Get-Content .\scripts\serveAppCalculationTests.ps1 -Raw | Invoke-Expression
 ```
 
 Then open:
@@ -167,10 +167,10 @@ These links do not provide live synchronization, account invitations, or private
 Use the local server and a fresh browser profile or separate private session. Run test pages one at a time:
 
 ```text
-http://127.0.0.1:8765/js/simulateInvestment.test.html
-http://127.0.0.1:8765/js/appCalculation.test.html
-http://127.0.0.1:8765/js/retirementCalculation.test.html
-http://127.0.0.1:8765/js/profitDonut.test.html
+http://127.0.0.1:8765/tests/simulateInvestment.test.html
+http://127.0.0.1:8765/tests/appCalculation.test.html
+http://127.0.0.1:8765/tests/retirementCalculation.test.html
+http://127.0.0.1:8765/tests/profitDonut.test.html
 ```
 
 The pages run automatically and display results. Check the browser console as well: passing numeric assertions do not by themselves establish that no JavaScript exception occurred.

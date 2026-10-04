@@ -15,7 +15,7 @@
 </head>
 <body>
   <h1>Milestone profit donut lifecycle</h1>
-  <p>This standalone suite loads the real planner in an iframe and asserts numeric results. From PowerShell at the workspace root, run <code>Get-Content .\js\serveAppCalculationTests.ps1 -Raw | Invoke-Expression</code>, then open <code>http://127.0.0.1:8765/js/profitDonut.test.html</code>. Press Ctrl+C to stop the server. It refuses to run from <code>file://</code> so the planner's normal file-page storage is not touched.</p>
+  <p>This standalone suite loads the real planner in an iframe and asserts numeric results. From PowerShell at the workspace root, run <code>Get-Content .\scripts\serveAppCalculationTests.ps1 -Raw | Invoke-Expression</code>, then open <code>http://127.0.0.1:8765/tests/profitDonut.test.html</code>. Press Ctrl+C to stop the server. It refuses to run from <code>file://</code> so the planner's normal file-page storage is not touched.</p>
   <div id="status">Starting checks...</div>
   <iframe id="planner" title="Isolated planner under test"></iframe>
   <script>
