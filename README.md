@@ -87,7 +87,7 @@ The current cleanup separates calculations and cohesive interface features from 
 | `js/planUI.js` | Saved-plan list, active-plan bar, and plan-panel controls. |
 | `js/displayUtils.js` | Color helpers, currency formatting and display conversion, and display-year helpers. |
 | `js/analyticsCharts.js` | Portfolio expansion and profit donut charts, including lifecycle, animations, and hover interactions. |
-| `js/resultsUI.js` | Overview portfolio summary cards and clickable portfolio-split graphic from explicit person IDs, totals, and inflation inputs. Uses currency helpers and the controller's mini-pie helper; calculations and modal state remain in `app.js`. |
+| `js/resultsUI.js` | Overview portfolio summary cards and clickable portfolio-split graphic, plus selected-person and household top summaries. Uses currency helpers and the controller's mini-pie and name-escaping helpers; calculations, selection, analysis, and modal state remain in `app.js`. |
 | `README.md` | Project orientation, current scope, file responsibilities, development priorities, and working instructions. |
 
 ### Script order

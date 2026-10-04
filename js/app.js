@@ -1857,77 +1857,7 @@ householdMembers =
 // RENDER FUNCTIONS
 // =========================
 
-function renderTopSummary(
-  highlightedPersonName,
-  dotHTML,
-  highlightedScenarioData,
-  useInflation
-) {
 
-document.getElementById('combinedResults').innerHTML = `
-
-<div class="results-section">
-
-  <h2 class="results-title person-result-title" style="margin-bottom:10px;">
-    ${dotHTML}
-    ${escapeHTML(highlightedPersonName)} Analysis
-  </h2>
-
-  <div class="results" style="display:flex;align-items:stretch;">
-
-    <div class="card" style="flex:1;">
-
-      <h3>
-        ${
-          useInflation
-            ? 'Total Value (Purchasing Power)'
-            : 'Total Value'
-        }
-      </h3>
-
-      <p>
-        ${getCurrency()}${formatCurrency(highlightedScenarioData.base)}
-      </p>
-
-    </div>
-
-    <div class="card" style="flex:1;">
-
-      <h3>Total Invested</h3>
-
-      <p>
-        ${getCurrency()}${formatCurrency(highlightedScenarioData.invested)}
-      </p>
-
-    </div>
-
-    <div class="card" style="flex:1;">
-
-      <h3>Total Profit</h3>
-
-      <p>
-        ${getCurrency()}${formatCurrency(highlightedScenarioData.profit)}
-      </p>
-
-    </div>
-
-    <button onclick="exitAnalysisMode()" class="exit-analysis-btn" title="Exit analysis">
-      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
-        fill="none" stroke="currentColor" stroke-width="2.5"
-        stroke-linecap="round" stroke-linejoin="round">
-        <line x1="18" y1="6" x2="6" y2="18"/>
-        <line x1="6" y1="6" x2="18" y2="18"/>
-      </svg>
-      Exit Analysis
-    </button>
-
-  </div>
-
-</div>
-
-`;
-
-}
 
 
 // =========================
