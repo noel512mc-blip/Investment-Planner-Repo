@@ -1,9 +1,25 @@
+let retirementRenderGeneration = 0;
+let retirementRenderTimer = null;
+let retirementHeroFrame = null;
+
+function clearRetirementRender() {
+  retirementRenderGeneration++;
+  clearTimeout(retirementRenderTimer);
+  cancelAnimationFrame(retirementHeroFrame);
+  retirementRenderTimer = null;
+  retirementHeroFrame = null;
+  retirementFiYear = null;
+  retirementAowYear = null;
+}
+
 function renderRetirementTable(
   initial, monthly, increaseRate, returnRate, scenarioRange,
   useInflation, inflationRate, currentAge, statePensionAge,
   withdrawalGoal, withdrawalRate, color, noStatePension,
   statePensionIncome, additionalIncomeSources
 ) {
+  clearRetirementRender();
+  const generation = retirementRenderGeneration;
   statePensionIncome    = statePensionIncome || 0;
   additionalIncomeSources = Array.isArray(additionalIncomeSources) ? additionalIncomeSources : [];
 
@@ -384,20 +400,23 @@ function renderRetirementTable(
     </div>`;
 
   // ── POST-RENDER: hero count-up + chart markers ───────────
-  setTimeout(() => {
+  retirementRenderTimer = setTimeout(() => {
+    if (generation !== retirementRenderGeneration) return;
+    retirementRenderTimer = null;
     if (baseGoalAge) {
       const heroEl = document.getElementById('retHeroValue');
       if (heroEl) {
         let start = null;
         function tick(ts) {
+          if (generation !== retirementRenderGeneration || !heroEl.isConnected) return;
           if (!start) start = ts;
           const p    = Math.min((ts - start) / 1200, 1);
           const ease = 1 - Math.pow(1 - p, 3);
           heroEl.textContent = Math.round(ease * baseGoalAge);
-          if (p < 1) requestAnimationFrame(tick);
+          if (p < 1) retirementHeroFrame = requestAnimationFrame(tick);
           else if (window.DEBUG_ANIMATIONS) console.log('[ANIM] retirement FI age count-up complete');
         }
-        requestAnimationFrame(tick);
+        retirementHeroFrame = requestAnimationFrame(tick);
         if (window.DEBUG_ANIMATIONS) console.log('[ANIM] retirement FI age count-up start', { target: baseGoalAge });
       }
     }

@@ -1878,8 +1878,7 @@ function setAnalysisTab(tab) {
   }
   analysisTab = tab;
   if (tab !== 'retirement') {
-    retirementFiYear  = null;
-    retirementAowYear = null;
+    clearRetirementRender();
     if (chart) chart.update('none');
     // Clean up retirement setup overlay elements when leaving the tab
     _retBlurActive = false;
@@ -1898,6 +1897,7 @@ function setAnalysisTab(tab) {
 
 function exitAnalysisMode() {
   _saveCurrentPersonRetirementSettings();
+  clearRetirementRender();
   if (profitDonutChart) { profitDonutChart.destroy(); profitDonutChart = null; }
   _cleanupRetirementSetupUI();
   highlightedTarget = null;
@@ -3390,6 +3390,7 @@ const bottomResults =
 
 combinedResults.innerHTML = '';
 clearProfitDonut();
+clearRetirementRender();
 personResults.innerHTML = '';
 
 bottomResults.innerHTML = '';

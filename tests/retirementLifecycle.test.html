@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Milestone retirement lifecycle checks</title>
+  <style>
+    body { max-width: 900px; margin: 32px auto; padding: 0 20px; font: 14px/1.5 system-ui, sans-serif; color: #1f2937; }
+    h1 { font-size: 22px; }
+    #status { padding: 12px; background: #f3f4f6; border-radius: 6px; white-space: pre-wrap; }
+    #status.pass { background: #ecfdf5; color: #065f46; }
+    #status.fail { background: #fef2f2; color: #991b1b; }
+    iframe { position: fixed; left: 0; top: 0; width: 1280px; height: 900px; border: 0; }
+  </style>
+</head>
+<body>
+  <h1>Milestone retirement lifecycle</h1>
+  <p>This standalone suite loads the real planner in an iframe and asserts retirement state and visible behavior. From PowerShell at the workspace root, run <code>Get-Content .\scripts\serveAppCalculationTests.ps1 -Raw | Invoke-Expression</code>, then open <code>http://127.0.0.1:8765/tests/retirementLifecycle.test.html</code>. Press Ctrl+C to stop the server. It refuses to run from <code>file://</code> so the planner's normal file-page storage is not touched.</p>
+  <div id="status">Starting checks...</div>
+  <iframe id="planner" title="Isolated planner under test"></iframe>
+  <script>
+    (async function() {
+      const status = document.getElementById('status');
+      const frame = document.getElementById('planner');
+      const checks = [];
+
+      if (location.protocol !== 'http:' || !['localhost', '127.0.0.1'].includes(location.hostname)) {
+        status.className = 'fail';
+        status.textContent = 'NOT RUN: open this page from a localhost web server to keep test storage separate from the normal file:// planner.';
+        return;
+      }
+
+      const previousPlans = localStorage.getItem('investment_plans');
+      const previousActiveId = localStorage.getItem('investment_activePlanId');
+      const retirement = {
+        currentAge: 30,
+        withdrawalGoal: 5000,
+        withdrawalRate: 4,
+        statePensionEnabled: true,
+        statePensionAge: 67,
+        statePensionIncome: 0,
+        additionalIncomeSources: []
+      };
+
+      function person(id, name, initial, monthly, increaseRate = 0) {
+        return {
+          id, name, initial, monthly, increaseRate, startOffset: 1, stopOffset: 0,
+          returnRate: null,
+          retirementSettings: { ...retirement }
+        };
+      }
+
+      function plan(name, people, options = {}) {
+        return {
+          name,
+          people,
+          settings: {
+            years: 1,
+            increaseRate: 2,
+            returnRate: 8,
+            perPersonReturn: false,
+            useInflation: false,
+            inflationRate: 2.5,
+            scenarioRange: 2,
+            currentAge: 30,
+            retirementAge: 67,
+            noStatePension: false,
+            withdrawalGoal: 5000,
+            withdrawalRate: 4,
+            statePensionIncome: 0,
+            householdMembers: [],
+            currency: '\u20ac',
+            startYear: 0,
+            ...options
+          }
+        };
+      }
+
+      function record(name, inputs, expectation, actual) {
+        checks.push({ name, inputs, expectation, actual, passed: true });
+      }
+
+      async function waitFor(predicate, description, timeout = 12000) {
+        const deadline = Date.now() + timeout;
+        while (Date.now() < deadline) {
+          if (predicate()) return;
+          await new Promise(resolve => setTimeout(resolve, 40));
+        }
+        throw new Error(`Timed out waiting for ${description}`);
+      }
+
+      async function loadPlan(testPlan, id) {
+        localStorage.setItem('investment_plans', JSON.stringify({ [id]: testPlan }));
+        localStorage.setItem('investment_activePlanId', id);
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('Planner page load timed out')), 20000);
+          frame.onload = () => { clearTimeout(timer); resolve(); };
+          frame.onerror = () => { clearTimeout(timer); reject(new Error('Planner page failed to load')); };
+          frame.src = `../index.html?calculationTest=${Date.now()}`;
+        });
+        const win = frame.contentWindow;
+        const doc = win.document;
+        await waitFor(() => win.Chart && win.Chart.getChart(doc.getElementById('investmentChart')), 'main investment chart');
+        return { win, doc, chart: win.Chart.getChart(doc.getElementById('investmentChart')) };
+      }
+
+      async function runCase(name, inputs, expectation, body) {
+        try {
+          const actual = await body();
+          record(name, inputs, expectation, actual);
+        } catch (error) {
+          checks.push({ name, inputs, expectation, actual: error.message, passed: false });
+        }
+      }
+
+      const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+      const errors = [];
+      function snapshot(win) {
+        return win.eval('({hero: document.getElementById("retHeroValue")?.textContent || null, fi: retirementFiYear, aow: retirementAowYear})');
+      }
+      function equal(actual, expected, label) {
+        if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(label + ': ' + JSON.stringify(actual) + ' expected ' + JSON.stringify(expected));
+      }
+      try {
+        const fixture = plan('Retirement lifecycle', [person(1, 'First', 1000000, 0), person(2, 'Latest', 0, 1000)], { years: 10, withdrawalGoal: 2000 });
+        fixture.people[0].retirementSettings = { ...retirement, withdrawalGoal: 2000 };
+        fixture.people[1].retirementSettings = { ...retirement, currentAge: 40, statePensionAge: 68, withdrawalGoal: 2000 };
+        const { win, doc } = await loadPlan(fixture, 'retirement_lifecycle');
+        win.addEventListener('error', e => errors.push(e.message));
+        win.addEventListener('unhandledrejection', e => errors.push(String(e.reason)));
+        // Suppress onboarding for both fixture people without changing production behavior.
+        win.eval('retirementStatus[activePlanId + "__1"] = "verified"; retirementStatus[activePlanId + "__2"] = "verified"');
+        // Retain callbacks as well as scheduling them normally. Replaying a cancelled
+        // callback proves ownership guards independently of clearTimeout/cancelAnimationFrame.
+        const timers = [];
+        const frames = [];
+        const originalTimeout = win.setTimeout.bind(win);
+        const originalRAF = win.requestAnimationFrame.bind(win);
+        win.setTimeout = (fn, ms, ...args) => { if (ms === 80) timers.push(fn); return originalTimeout(fn, ms, ...args); };
+        win.requestAnimationFrame = fn => { if (fn.name === 'tick') frames.push(fn); return originalRAF(fn); };
+        const open = id => { win.highlightTarget(id); win.setAnalysisTab('retirement'); };
+        const settle = async () => { await sleep(1550); return snapshot(win); };
+        await runCase('Leave for Profit before delayed callback', 'person 1, immediate Profit', 'no hero; null markers', async () => {
+          open(1); const stale = timers.slice(); win.setAnalysisTab('profit');
+          stale.forEach(fn => fn()); await sleep(150);
+          const actual = snapshot(win);
+          equal(actual, {hero:null, fi:null, aow:null}, 'Profit');
+          if (!doc.getElementById('profitDonutCanvas')) throw new Error('Profit not visible');
+          return actual;
+        });
+        await runCase('Exit analysis before delayed callback', 'person 1, immediate exit', 'no hero; null markers', async () => {
+          open(1); const stale = timers.slice(); win.exitAnalysisMode();
+          stale.forEach(fn => fn()); await sleep(150);
+          const actual = snapshot(win);
+          equal(actual, {hero:null, fi:null, aow:null}, 'Exit'); return actual;
+        });
+        // Independently derive expected FI ages from the unchanged calculation helper.
+        function expected(id) {
+          const p = fixture.people[id - 1], r = p.retirementSettings;
+          const rows = win.calculateRetirementRows({initial:p.initial, monthly:p.monthly, increaseRate:0,
+            useInflation:false, inflationRate:.025, currentAge:r.currentAge, statePensionAge:r.statePensionAge,
+            withdrawalGoal:r.withdrawalGoal, withdrawalRate:4, noStatePension:false,
+            statePensionIncome:0, additionalIncomeSources:[], startYear:0}, .08);
+          const age = rows.find(row => row.goalMet)?.age;
+          return {hero: age ? String(age) : '—', fi:age ? age-r.currentAge:null, aow:r.statePensionAge-r.currentAge};
+        }
+        await runCase('Switch people during delay', 'first to latest before 80ms', 'latest hero and markers only, including replayed obsolete callback', async () => {
+          open(1); const stale = timers.slice(); win.highlightTarget(2);
+          await sleep(100); const hero = doc.getElementById('retHeroValue');
+          const before = hero.textContent; stale.forEach(fn => fn());
+          equal(hero.textContent, before, 'Old callback changed latest hero');
+          equal(snapshot(win).fi, expected(2).fi, 'Latest FI marker');
+          const actual = await settle(); equal(actual, expected(2), 'Latest person'); return actual;
+        });
+        await runCase('Switch people during hero animation', 'first to latest after 200ms', 'obsolete frames leave detached and latest heroes untouched', async () => {
+          win.highlightTarget(1); await sleep(200);
+          const oldHero = doc.getElementById('retHeroValue'); const stale = frames.slice();
+          win.highlightTarget(2); const oldValue = oldHero.textContent;
+          stale.forEach(fn => fn(win.performance.now()+1500));
+          equal(oldHero.textContent, oldValue, 'Obsolete frame changed detached hero');
+          const actual = await settle(); equal(actual, expected(2), 'Latest animated person'); return actual;
+        });
+        await runCase('Ordinary retirement rendering and exit', 'latest person recalculation, hover, duration lock', '80ms marker timing, animated hero, rows and lock preserved; clear on exit', async () => {
+          win.calculateInvestment();
+          const before = snapshot(win); equal(before, {hero:'0', fi:null, aow:null}, 'Hero and markers before delay');
+          await sleep(150); const mid = snapshot(win);
+          equal(mid.fi, expected(2).fi, 'Ordinary marker'); equal(mid.aow, 28, 'Pension marker');
+          if (+mid.hero >= +expected(2).hero) throw new Error('Hero did not animate');
+          const actual = await settle(); equal(actual, expected(2), 'Ordinary values');
+          const row = doc.querySelector('.ret-table-row');
+          if (!row || row.getBoundingClientRect().height <= 0) throw new Error('Rows not visible');
+          row.dispatchEvent(new win.MouseEvent('mouseenter'));
+          equal(win.eval('milestoneActiveYear'), 1, 'Row hover');
+          row.dispatchEvent(new win.MouseEvent('mouseleave'));
+          equal(win.eval('milestoneActiveYear'), null, 'Row leave');
+          if (!doc.getElementById('years').disabled) throw new Error('Duration not locked');
+          win.exitAnalysisMode(); equal(snapshot(win), {hero:null, fi:null, aow:null}, 'Settled exit');
+          if (doc.getElementById('years').disabled) throw new Error('Duration not released');
+          equal(errors, [], 'Console errors'); return {before, mid, actual, errors};
+        });
+      } finally {
+        frame.remove();
+        if (previousPlans === null) localStorage.removeItem('investment_plans'); else localStorage.setItem('investment_plans', previousPlans);
+        if (previousActiveId === null) localStorage.removeItem('investment_activePlanId'); else localStorage.setItem('investment_activePlanId', previousActiveId);
+      }
+      const failures = checks.filter(check => !check.passed);
+      status.className = failures.length ? 'fail' : 'pass';
+      status.textContent = `${failures.length ? 'FAILED' : 'PASS'} (${checks.length - failures.length}/${checks.length})\n\n`
+        + checks.map(check => `${check.passed ? 'PASS' : 'FAIL'} ${check.name}\nInputs: ${check.inputs}\nExpected: ${check.expectation}\nActual: ${JSON.stringify(check.actual)}`).join('\n\n');
+    })().catch(error => { document.getElementById('status').textContent = `TEST RUNNER ERROR: ${error.stack}`; });
+  </script>
+</body>
+</html>

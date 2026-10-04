@@ -117,6 +117,7 @@ Some earlier functions use state or helpers defined in `app.js` when called late
 | `tests/simulateInvestment.test.html` | Direct numeric checks of the investment simulator. |
 | `tests/appCalculation.test.html` | Planner calculations, personal rates, persistence, projections, household selection, and all-person totals. |
 | `tests/retirementCalculation.test.html` | Retirement rows, pension and additional income, inflation, scenarios, and per-person settings. |
+| `tests/retirementLifecycle.test.html` | Retirement delayed callbacks, person switching, hero animation, marker state, row hover, and duration locking. |
 | `tests/profitDonut.test.html` | Delayed chart creation, rapid recalculation, view switching, latest values, and donut/KPI interactions. |
 | `scripts/serveAppCalculationTests.ps1` | Local PowerShell web server for the application and browser tests. |
 
@@ -175,6 +176,7 @@ http://127.0.0.1:8765/tests/simulateInvestment.test.html
 http://127.0.0.1:8765/tests/appCalculation.test.html
 http://127.0.0.1:8765/tests/retirementCalculation.test.html
 http://127.0.0.1:8765/tests/profitDonut.test.html
+http://127.0.0.1:8765/tests/retirementLifecycle.test.html
 ```
 
 The pages run automatically and display results. Check the browser console as well: passing numeric assertions do not by themselves establish that no JavaScript exception occurred.
